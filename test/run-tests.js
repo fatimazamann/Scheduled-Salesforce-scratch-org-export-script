@@ -712,6 +712,39 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 		pickWindowsExecutable([npmDir + 'sf'], none) === null
 	);
 	check('empty input is null', pickWindowsExecutable([], none) === null);
+
+	// A path with a space must keep REAL grouping quotes around the command
+	// name, or cmd.exe splits it and reports '"C:\\Users\\Cloud' is not recognized.
+	const { buildInvocation, quoteCommandForCmd, findCliEntryNear } = require('../lib/sf-cli');
+	check(
+		'command name keeps real quotes, not carets',
+		quoteCommandForCmd('C:\\Users\\Cloud Junction\\npm\\sf.cmd') === '"C:\\Users\\Cloud Junction\\npm\\sf.cmd"'
+	);
+	check(
+		'refuses a path that cannot be quoted safely',
+		(() => { try { quoteCommandForCmd('C:\\a%PATH%\\sf.cmd'); return false; } catch (e) { return /sfCliEntry/.test(e.message); } })()
+	);
+	check(
+		'non-shim targets still bypass the shell entirely',
+		buildInvocation('/usr/local/bin/sf', ['org', 'list']).windowsVerbatimArguments === false
+	);
+
+	// Auto-discovery of the CLI's JS entry point removes cmd.exe from the path.
+	// NOTE: findCliEntryNear uses the platform's own path module, so these cases
+	// use POSIX paths -- on Windows the same logic runs against Windows paths.
+	const npmWin = '/c/Users/Cloud Junction/AppData/Roaming/npm';
+	check(
+		'finds run.js beside an npm-installed shim',
+		findCliEntryNear(npmWin + '/sf.cmd', (p) => p === npmWin + '/node_modules/@salesforce/cli/bin/run.js') ===
+			npmWin + '/node_modules/@salesforce/cli/bin/run.js'
+	);
+	check(
+		'finds run.js under a POSIX npm prefix',
+		findCliEntryNear('/usr/local/bin/sf', (p) => p === '/usr/local/lib/node_modules/@salesforce/cli/bin/run.js') ===
+			'/usr/local/lib/node_modules/@salesforce/cli/bin/run.js'
+	);
+	check('handles a path containing spaces', findCliEntryNear(npmWin + '/sf.cmd', none) === null);
+	check('returns null when no entry point is near', findCliEntryNear('/somewhere/sf.cmd', none) === null);
 }
 
 // ===========================================================================

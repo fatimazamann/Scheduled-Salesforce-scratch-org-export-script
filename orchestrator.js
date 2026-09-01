@@ -288,7 +288,27 @@ async function preflight(cfg, log) {
 	}
 	findings.sfExecutable = sfExecutable;
 	if (sfExecutable) log.info(`sf resolved to ${sfExecutable}`);
-	if (cfg.sfCliEntry) log.info(`sf will be invoked as: node ${cfg.sfCliEntry}`);
+
+	// Prefer the CLI's own JS entry point when we can find it next to the shim.
+	// Spawning `node run.js` uses no shell at all, so paths with spaces and
+	// shell metacharacters stop being a concern entirely. Only fall back to the
+	// .cmd shim (and its cmd.exe hop) when no entry point is discoverable.
+	let sfCliEntry = cfg.sfCliEntry || '';
+	if (!sfCliEntry && sfExecutable) {
+		const discovered = sfcli.findCliEntryNear(sfExecutable);
+		if (discovered) {
+			sfCliEntry = discovered;
+			log.info(`Found the CLI entry point; invoking it directly with no shell: node ${discovered}`);
+		} else if (/\.(cmd|bat)$/i.test(sfExecutable)) {
+			log.debug(
+				'No run.js found near the shim; falling back to invoking sf.cmd through cmd.exe. ' +
+					'Set "sfCliEntry" in the config to skip that hop.'
+			);
+		}
+	} else if (sfCliEntry) {
+		log.info(`sf will be invoked as: node ${sfCliEntry}`);
+	}
+	findings.sfCliEntry = sfCliEntry;
 
 	// --- Scripts ----------------------------------------------------------
 	for (const [label, p] of [
@@ -321,7 +341,7 @@ async function preflight(cfg, log) {
 	// --- CLI version (also proves the CLI actually executes for this user) --
 	const runner = sfcli.createSfRunner({
 		sfExecutable: findings.sfExecutable,
-		sfCliEntry: cfg.sfCliEntry || undefined,
+		sfCliEntry: findings.sfCliEntry || undefined,
 		timeoutMs: cfg.sfCommandTimeoutSeconds * 1000,
 	});
 	const version = await runner.sf(['--version']);
@@ -642,7 +662,10 @@ function buildChildArgs(cfg, org, exportDir) {
 		for (const name of connectors) args.push('--connector-name', String(name));
 	}
 	if (cfg.sfExecutable) args.push('--sf-executable', cfg.sfExecutable);
-	if (cfg.sfCliEntry) args.push('--sf-cli-entry', cfg.sfCliEntry);
+	// resolvedSfCliEntry is what preflight actually settled on, which may have
+	// been auto-discovered rather than configured.
+	if (cfg.resolvedSfCliEntry) args.push('--sf-cli-entry', cfg.resolvedSfCliEntry);
+	else if (cfg.sfCliEntry) args.push('--sf-cli-entry', cfg.sfCliEntry);
 	if (cfg.cleanScript) args.push('--clean-script', cfg.cleanScript);
 
 	return { args, integrationType, connectors };
@@ -867,6 +890,8 @@ async function main() {
 	// --- Preflight --------------------------------------------------------
 	const pre = await preflight(cfg, log);
 	summary.versions = pre.versions;
+	// cfg is frozen; carry the resolved entry alongside it for buildChildArgs.
+	cfg = Object.freeze({ ...cfg, resolvedSfCliEntry: pre.sfCliEntry || '' });
 	if (!pre.ok) {
 		log.error('Preflight failed. No orgs were processed.');
 		summary.exitCode = EXIT.PREFLIGHT;
