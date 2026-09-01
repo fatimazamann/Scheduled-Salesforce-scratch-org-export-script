@@ -326,10 +326,17 @@ async function preflight(cfg, log) {
 	});
 	const version = await runner.sf(['--version']);
 	if (version.code !== 0) {
-		fail(
-			`"sf --version" failed with exit code ${version.code}. ` +
-				`stderr: ${(version.stderr || '').trim().slice(0, 500)}`
-		);
+		const stderr = (version.stderr || '').trim();
+		let hint = '';
+		if (/ENOENT/i.test(stderr)) {
+			// Almost always the extensionless npm shim, which Windows cannot start.
+			hint =
+				' This usually means the resolved path is a shim Windows cannot execute directly ' +
+				'(npm installs an extensionless bash script alongside the .cmd). Set "sfExecutable" ' +
+				'in the config to the full path of sf.cmd, or better, set "sfCliEntry" to the CLI\'s ' +
+				'run.js so it is invoked as `node run.js` with no shell at all.';
+		}
+		fail(`"sf --version" failed with exit code ${version.code}. stderr: ${stderr.slice(0, 500)}${hint}`);
 		return findings;
 	}
 	findings.versions.sf = (version.stdout || '').trim().split(/\r?\n/)[0];

@@ -679,6 +679,41 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 	check('path separator rejected', threw2 instanceof ConfigError, threw2 && threw2.message);
 }
 
+
+// --- Windows executable resolution -------------------------------------------------
+{
+	process.stdout.write('\n  EXE resolving the sf CLI on Windows (npm ships three shims)\n');
+	const { pickWindowsExecutable } = require('../lib/sf-cli');
+	const none = () => false;
+	const npmDir = 'C:\\Users\\Cloud Junction\\AppData\\Roaming\\npm\\';
+
+	// The exact failure seen in the field: `where sf` lists the extensionless
+	// bash shim first, which CreateProcess cannot execute (ENOENT).
+	check(
+		'prefers .cmd over the extensionless npm shim',
+		pickWindowsExecutable([npmDir + 'sf', npmDir + 'sf.cmd', npmDir + 'sf.ps1'], none) === npmDir + 'sf.cmd',
+		pickWindowsExecutable([npmDir + 'sf', npmDir + 'sf.cmd', npmDir + 'sf.ps1'], none)
+	);
+	check(
+		'prefers a real .exe over everything',
+		pickWindowsExecutable(['C:\\sf\\bin\\sf.cmd', 'C:\\sf\\bin\\sf.exe'], none) === 'C:\\sf\\bin\\sf.exe'
+	);
+	check(
+		'never returns a .ps1',
+		!/\.ps1$/i.test(pickWindowsExecutable([npmDir + 'sf.ps1', npmDir + 'sf.cmd'], none) || '')
+	);
+	// Only the unrunnable shim came back -- find the sibling npm installed.
+	check(
+		'falls back to a sibling .cmd on disk',
+		pickWindowsExecutable([npmDir + 'sf'], (p) => p === npmDir + 'sf.cmd') === npmDir + 'sf.cmd'
+	);
+	check(
+		'returns null when nothing is runnable',
+		pickWindowsExecutable([npmDir + 'sf'], none) === null
+	);
+	check('empty input is null', pickWindowsExecutable([], none) === null);
+}
+
 // ===========================================================================
 process.stdout.write(`\n${'='.repeat(56)}\n`);
 process.stdout.write(`  ${pass} passed, ${fail} failed\n`);
