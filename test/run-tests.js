@@ -82,6 +82,8 @@ function runScenario(name, { orgs = [], orgFixtures = {}, config = {}, args = []
 			Object.assign(
 				{
 					exportRoot: path.join(work, 'exports'),
+					layout: 'per-run',
+					orgFolderPattern: '{alias}_{orgId}',
 					logRoot: path.join(work, 'logs'),
 					lockFile: path.join(work, 'logs', '.lock'),
 					exportScript: path.join(ROOT, 'export-script.js'),
@@ -366,7 +368,7 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 	check('exit code 0', r.code === 0, `got ${r.code}`);
 	check('status DRY_RUN for the eligible org', r.summary.orgs.find((o) => o.alias === 'org-a').status === 'DRY_RUN');
 	check('eligibility still evaluated', r.summary.orgs.find((o) => o.alias === 'no-app').status === 'SKIPPED_APP_NOT_INSTALLED');
-	check('proposed command shown', /DRY RUN -- would create directory and run/.test(r.logText));
+	check('proposed command shown', /DRY RUN -- would export into/.test(r.logText));
 	check('nothing was exported', !/data.export.tree/.test(r.calls));
 	check('no export directories created', !fs.existsSync(path.join(r.work, 'exports')) || fs.readdirSync(path.join(r.work, 'exports')).length === 0);
 }
@@ -400,6 +402,8 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 		cfgPath,
 		JSON.stringify({
 			exportRoot: path.join(work, 'exports'),
+			layout: 'per-run',
+			orgFolderPattern: '{alias}_{orgId}',
 			logRoot: path.join(work, 'logs'),
 			lockFile: path.join(work, 'logs', '.lock'),
 			exportScript: path.join(ROOT, 'export-script.js'),
@@ -531,7 +535,148 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 	check('windows reserved name replaced', sanitizeSegment('CON', 'fallback') === 'fallback');
 	check('falls back when empty', sanitizeSegment('///', 'fallback') === 'fallback');
 	check('length capped', sanitizeSegment('x'.repeat(200)).length <= 60);
-	check('uses orgId when alias is absent', orgDirectoryName({ username: 'u@e.com', orgId: '00D000000000001AAA' }) === 'u_00D000000000001AAA');
+	check('default pattern falls back when alias is absent', orgDirectoryName({ username: 'u@e.com', orgId: '00D000000000001AAA' }) === 'cj-export_u', orgDirectoryName({ username: 'u@e.com', orgId: '00D000000000001AAA' }));
+	check('orgId used when there is no alias and no username', orgDirectoryName({ orgId: '00D000000000001AAA' }, '{alias}') === '00D000000000001AAA');
+}
+
+
+// --- Per-org layout: stable folders, replaced each run --------------------------
+{
+	const base = fs.mkdtempSync(path.join(os.tmpdir(), 'sfexp-'));
+	const work = path.join(base, 'work');
+	const exportRoot = path.join(work, 'connectjunction-exports');
+	const perOrgConfig = {
+		exportRoot,
+		layout: 'per-org',
+		orgFolderPattern: 'cj-export_{alias}',
+		logRoot: path.join(work, 'logs'),
+		lockFile: path.join(work, 'logs', '.lock'),
+	};
+
+	const r1 = runScenario('PO1 per-org layout -> one stable folder per org, no run subfolder', {
+		orgs: [
+			scratchOrg({ username: 'a@example.com', alias: 'my-feature-org', orgId: '00D000000000101AAA' }),
+			scratchOrg({ username: 'b@example.com', alias: 'integration-test', orgId: '00D000000000102AAA' }),
+			scratchOrg({ username: 'c@example.com', alias: 'dev-org-4', orgId: '00D000000000103AAA' }),
+		],
+		orgFixtures: {
+			'a@example.com': { describe: 'ok', export: 'ok' },
+			'b@example.com': { describe: 'ok', export: 'ok' },
+			'c@example.com': { describe: 'ok', export: 'ok' },
+		},
+		config: perOrgConfig,
+	});
+	check('exit code 0', r1.code === 0, `got ${r1.code}`);
+	check('3 successes', r1.summary && r1.summary.success === 3);
+	const dirs1 = fs.readdirSync(exportRoot).sort();
+	check('exactly 3 folders in the export root', dirs1.length === 3, dirs1.join(', '));
+	check('named cj-export_<alias>', dirs1.join(',') === 'cj-export_dev-org-4,cj-export_integration-test,cj-export_my-feature-org', dirs1.join(','));
+	check('no timestamped run folder', !dirs1.some((d) => /^\d{8}_\d{6}$/.test(d)));
+	check('no leftover temp folders', !dirs1.some((d) => d.startsWith('.tmp_') || d.includes('.old_')));
+
+	// Mark a file so we can prove the second run REPLACED it rather than merged.
+	const target = path.join(exportRoot, 'cj-export_my-feature-org');
+	fs.writeFileSync(path.join(target, 'stale-leftover.json'), '{"gone":true}');
+	const mtimeBefore = fs.statSync(path.join(target, 'cja_cj__CJ_Connector__cs.json')).mtimeMs;
+
+	const r2 = runScenario('PO2 second run -> same folders, content replaced not merged', {
+		orgs: [
+			scratchOrg({ username: 'a@example.com', alias: 'my-feature-org', orgId: '00D000000000101AAA' }),
+			scratchOrg({ username: 'b@example.com', alias: 'integration-test', orgId: '00D000000000102AAA' }),
+			scratchOrg({ username: 'c@example.com', alias: 'dev-org-4', orgId: '00D000000000103AAA' }),
+		],
+		orgFixtures: {
+			'a@example.com': { describe: 'ok', export: 'ok', records: { cja_cj__CJ_Connector__c: 7 } },
+			'b@example.com': { describe: 'ok', export: 'ok' },
+			'c@example.com': { describe: 'ok', export: 'ok' },
+		},
+		config: perOrgConfig,
+	});
+	check('exit code 0', r2.code === 0, `got ${r2.code}`);
+	const dirs2 = fs.readdirSync(exportRoot).sort();
+	check('still exactly 3 folders', dirs2.length === 3, dirs2.join(', '));
+	check('stale file from the previous run is gone', !fs.existsSync(path.join(target, 'stale-leftover.json')));
+	const reexported = JSON.parse(fs.readFileSync(path.join(target, 'cja_cj__CJ_Connector__cs.json'), 'utf8'));
+	check('content is the new export', reexported.records.length === 7, String(reexported.records.length));
+
+	// A failing run must leave the good copy exactly as it was.
+	const r3 = runScenario('PO3 failed run -> existing folder left untouched', {
+		orgs: [scratchOrg({ username: 'a@example.com', alias: 'my-feature-org', orgId: '00D000000000101AAA' })],
+		orgFixtures: { 'a@example.com': { describe: 'ok', export: 'fail' } },
+		config: perOrgConfig,
+	});
+	check('exit code 1', r3.code === 1, `got ${r3.code}`);
+	const survived = JSON.parse(fs.readFileSync(path.join(target, 'cja_cj__CJ_Connector__cs.json'), 'utf8'));
+	check('previous good export survived the failure', survived.records.length === 7, String(survived.records.length));
+	const dirs3 = fs.readdirSync(exportRoot).sort();
+	check('no temp folder left behind by the failure', !dirs3.some((d) => d.startsWith('.tmp_')), dirs3.join(', '));
+	check('still exactly 3 folders', dirs3.length === 3, dirs3.join(', '));
+}
+
+// --- Retention must never eat the per-org folders --------------------------------
+{
+	process.stdout.write('\n  PO4 exportRetentionDays does not prune per-org folders\n');
+	const base = fs.mkdtempSync(path.join(os.tmpdir(), 'sfexp-'));
+	const work = path.join(base, 'work');
+	const exportRoot = path.join(work, 'connectjunction-exports');
+	const cfg = {
+		exportRoot,
+		layout: 'per-org',
+		orgFolderPattern: 'cj-export_{alias}',
+		logRoot: path.join(work, 'logs'),
+		lockFile: path.join(work, 'logs', '.lock'),
+		exportRetentionDays: 1,
+	};
+	const r = runScenario('    seeding a folder, then ageing it past retention', {
+		orgs: [scratchOrg({ username: 'a@example.com', alias: 'old-org', orgId: '00D000000000201AAA' })],
+		orgFixtures: { 'a@example.com': { describe: 'ok', export: 'ok' } },
+		config: cfg,
+	});
+	check('first run succeeded', r.code === 0, `got ${r.code}`);
+	// Backdate the folder well past the retention window.
+	const old = path.join(exportRoot, 'cj-export_old-org');
+	const past = Date.now() - 30 * 86400000;
+	fs.utimesSync(old, past / 1000, past / 1000);
+
+	const r2 = runScenario('    run again with a different org discovered', {
+		orgs: [scratchOrg({ username: 'z@example.com', alias: 'new-org', orgId: '00D000000000202AAA' })],
+		orgFixtures: { 'z@example.com': { describe: 'ok', export: 'ok' } },
+		config: cfg,
+	});
+	check('second run succeeded', r2.code === 0, `got ${r2.code}`);
+	check('the aged folder was NOT pruned', fs.existsSync(old));
+	check('both org folders present', fs.readdirSync(exportRoot).sort().join(',') === 'cj-export_new-org,cj-export_old-org', fs.readdirSync(exportRoot).join(','));
+}
+
+// --- Folder naming patterns --------------------------------------------------------
+{
+	process.stdout.write('\n  PO5 orgFolderPattern token substitution\n');
+	const { orgDirectoryName } = require('../orchestrator');
+	const org = { alias: 'my-feature-org', username: 'test-abc@example.com', orgId: '00D5g000004ABCDEAO' };
+	check('default pattern', orgDirectoryName(org, 'cj-export_{alias}') === 'cj-export_my-feature-org');
+	check('alias + orgId', orgDirectoryName(org, '{alias}_{orgId}') === 'my-feature-org_00D5g000004ABCDEAO');
+	check('orgId only', orgDirectoryName(org, '{orgId}') === '00D5g000004ABCDEAO');
+	check('usernamePrefix', orgDirectoryName(org, 'cj_{usernamePrefix}') === 'cj_test-abc');
+	check('alias falls back to username prefix', orgDirectoryName({ username: 'solo@example.com', orgId: '00D000000000001AAA' }, 'cj-export_{alias}') === 'cj-export_solo');
+	check('unsafe alias sanitised', orgDirectoryName({ alias: 'a/b\\c:d', username: 'u@e.com', orgId: '00D000000000001AAA' }, 'cj-export_{alias}') === 'cj-export_a-b-c-d', orgDirectoryName({ alias: 'a/b\\c:d', username: 'u@e.com', orgId: '00D000000000001AAA' }, 'cj-export_{alias}'));
+}
+
+// --- Config validation rejects a pattern that would collide ------------------------
+{
+	process.stdout.write('\n  PO6 config rejects an orgFolderPattern with no org token\n');
+	const { loadConfig, ConfigError } = require('../lib/config');
+	const base = fs.mkdtempSync(path.join(os.tmpdir(), 'sfexp-'));
+	const cfgPath = path.join(base, 'bad.json');
+	fs.writeFileSync(cfgPath, JSON.stringify({ orgFolderPattern: 'cj-export' }));
+	let threw = null;
+	try { loadConfig({ configPath: cfgPath, env: {} }); } catch (e) { threw = e; }
+	check('rejected', threw instanceof ConfigError, threw && threw.message);
+	check('explains why', threw && /every org would share one folder/.test(threw.message));
+
+	fs.writeFileSync(cfgPath, JSON.stringify({ orgFolderPattern: 'sub\\dir_{alias}' }));
+	let threw2 = null;
+	try { loadConfig({ configPath: cfgPath, env: {} }); } catch (e) { threw2 = e; }
+	check('path separator rejected', threw2 instanceof ConfigError, threw2 && threw2.message);
 }
 
 // ===========================================================================

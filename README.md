@@ -59,18 +59,38 @@ that only works inside VS Code will fail at 2am.
 ## Output
 
 ```
-exports/20260831_183000/my-feature-org_00D5g000004ABCDEAO/
-                          cja_cj__CJ_Connector__cs.json
-                          ...
-                          _export-summary.json      per-org manifest
-logs/export_20260831_183000.log                     human-readable
-logs/export_20260831_183000.json                    machine-readable
-logs/latest.json                                    copy of the most recent run
+connectjunction-exports\
+    cj-export_my-feature-org\        one folder per org, replaced every run
+        cja_cj__CJ_Connector__cs.json
+        cja_cj__JSON_Object_Mapping__cs.json
+        cja_cj__CJ_Message_Template__cs.json
+        cja_cj__Dataflow__cs.json     any-to-any only
+        export-demo-plan.json
+        _export-summary.json          when this org was last exported
+    cj-export_integration-test\
+    cj-export_dev-org-4\
+
+logs\
+    export_20260831_183000.log        human-readable
+    export_20260831_183000.json       machine-readable
+    latest.json                       copy of the most recent run
 ```
 
-Run directories are immutable — a rerun creates a new one rather than
-overwriting. `exports/` and `logs/` are gitignored and must stay that way: the
-exports contain customer configuration, including message template bodies.
+The export root always shows the current state of each org and nothing
+accumulates — three orgs means three folders, tonight replacing last night.
+`_export-summary.json` inside each folder records when that org was last
+exported.
+
+A run writes into a temporary folder and only swaps it into place once the
+export has fully succeeded, so a failed or partial run leaves the existing
+folder exactly as it was rather than half-overwriting it.
+
+**There is no history under this layout.** Once tonight succeeds, last night's
+content is gone. Set `"layout": "per-run"` to keep a timestamped folder per run
+instead, pruned by `exportRetentionDays`.
+
+`connectjunction-exports/` and `logs/` are gitignored and must stay that way:
+the exports contain customer configuration, including message template bodies.
 
 ## Configuration
 
@@ -82,6 +102,7 @@ task without editing a tracked file:
 |---|---|
 | `SFEXPORT_CONFIG` | path to the config file |
 | `SFEXPORT_EXPORT_ROOT` / `SFEXPORT_LOG_ROOT` | output locations |
+| `SFEXPORT_LAYOUT` | `per-org` \| `per-run` |
 | `SFEXPORT_SF_EXECUTABLE` / `SFEXPORT_SF_CLI_ENTRY` | how `sf` is invoked |
 | `SFEXPORT_INTEGRATION_TYPE` | `any-to-any` \| `salesforce-to-any` \| empty |
 | `SFEXPORT_CONNECTORS` | comma-separated connector filter |
@@ -110,7 +131,7 @@ opts back in to `sf org login web` for Sandbox and Production only.
 node test\run-tests.js
 ```
 
-100 assertions covering the full test matrix against a mock Salesforce CLI: org
+128 assertions covering the full test matrix against a mock Salesforce CLI: org
 discovery and filtering, expiry, package detection, failure isolation, retry
 policy, locking, dry run, paths with spaces, SOQL escaping, Windows command-line
 escaping, and secret redaction. No org and no network required.

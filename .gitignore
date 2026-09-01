@@ -6,6 +6,7 @@
 # non-sensitive. Message templates in particular routinely contain real names,
 # addresses and business rules. Treat exports/ as customer data on disk.
 # ---------------------------------------------------------------------------
+connectjunction-exports/
 exports/
 logs/
 

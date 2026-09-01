@@ -100,14 +100,80 @@ function sanitizeSegment(input, fallback) {
 }
 
 /**
- * Directory name for one org: <label>_<orgId>.
- * The org ID is the stable part -- aliases are local conveniences that may be
- * missing, duplicated, or renamed, so they are a label and never the identity.
+ * Directory name for one org, built from cfg.orgFolderPattern.
+ *
+ * Tokens: {alias} {orgId} {username} {usernamePrefix}
+ * {alias} falls back to the username prefix when the org has no alias, because
+ * aliases are local conveniences that may be missing entirely.
+ *
+ * Every substituted value is sanitised individually, then the whole name is
+ * sanitised again -- this string becomes a path a scheduled task writes to.
  */
-function orgDirectoryName(org) {
-	const label = org.alias || (org.username || '').split('@')[0];
-	const id = org.orgId ? String(org.orgId).slice(0, 18) : 'unknown-org';
-	return `${sanitizeSegment(label, 'org')}_${sanitizeSegment(id, 'unknown-org')}`;
+function orgDirectoryName(org, pattern = 'cj-export_{alias}') {
+	const usernamePrefix = (org.username || '').split('@')[0];
+	const orgId = org.orgId ? String(org.orgId).slice(0, 18) : 'unknown-org';
+	const tokens = {
+		alias: org.alias || usernamePrefix || orgId,
+		orgId,
+		username: org.username || orgId,
+		usernamePrefix: usernamePrefix || orgId,
+	};
+	const filled = String(pattern).replace(/\{(\w+)\}/g, (whole, key) =>
+		tokens[key] === undefined ? whole : sanitizeSegment(tokens[key], 'org')
+	);
+	return sanitizeSegment(filled, `org_${orgId}`);
+}
+
+/**
+ * Swap a freshly exported temp folder into its final place.
+ *
+ * The temp-then-swap dance exists so a failed or partial export can never
+ * damage the copy that is already on disk -- important with layout "per-org",
+ * where that copy is the only one there is. The old folder is moved aside
+ * first, so the window in which the destination does not exist is a single
+ * rename rather than a recursive delete.
+ */
+function swapIntoPlace(tempDir, targetDir, runId) {
+	const asideDir = `${targetDir}.old_${runId}`;
+	// The parent must exist before a rename can land in it. Under the per-run
+	// layout that parent is the run folder, which nothing has created yet.
+	fs.mkdirSync(path.dirname(targetDir), { recursive: true });
+	if (fs.existsSync(targetDir)) {
+		fs.renameSync(targetDir, asideDir);
+	}
+	try {
+		fs.renameSync(tempDir, targetDir);
+	} catch (err) {
+		// Put the previous content back rather than leaving nothing behind.
+		if (fs.existsSync(asideDir) && !fs.existsSync(targetDir)) {
+			try {
+				fs.renameSync(asideDir, targetDir);
+			} catch (_) {
+				/* nothing further we can safely do */
+			}
+		}
+		throw err;
+	}
+	fs.rmSync(asideDir, { recursive: true, force: true });
+}
+
+/**
+ * Remove temp and set-aside folders left behind by a run that was killed
+ * mid-swap. Runs before any export so a crashed night cannot accumulate.
+ */
+function cleanStaleWorkDirs(root, log) {
+	if (!fs.existsSync(root)) return;
+	for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+		if (!entry.isDirectory()) continue;
+		if (!/^\.tmp_/.test(entry.name) && !/\.old_\d{8}_\d{6}$/.test(entry.name)) continue;
+		const full = path.join(root, entry.name);
+		try {
+			fs.rmSync(full, { recursive: true, force: true });
+			log.warn(`Removed leftover work directory from an interrupted run: ${entry.name}`);
+		} catch (err) {
+			log.warn(`Could not remove leftover work directory ${entry.name}: ${err.message}`);
+		}
+	}
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -853,8 +919,12 @@ async function main() {
 		}
 
 		summary.discovered = orgs.length;
-		const runExportRoot = path.join(cfg.exportRoot, runId);
+		// per-org: one stable folder per org directly under the export root.
+		// per-run: a timestamped folder per run, keeping history.
+		const runExportRoot = cfg.layout === 'per-run' ? path.join(cfg.exportRoot, runId) : cfg.exportRoot;
 		summary.runExportRoot = runExportRoot;
+		summary.layout = cfg.layout;
+		if (!cfg.dryRun) cleanStaleWorkDirs(cfg.exportRoot, log);
 
 		if (orgs.length === 0) {
 			log.info('No authenticated scratch orgs found. Nothing to do -- this is a successful no-op.');
@@ -927,25 +997,32 @@ async function main() {
 
 			// 4. eligible -> export
 			summary.eligible += 1;
-			const exportDir = path.join(runExportRoot, orgDirectoryName(safe));
+			const folderName = orgDirectoryName(safe, cfg.orgFolderPattern);
+			const exportDir = path.join(runExportRoot, folderName);
 			record.exportDir = exportDir;
+			record.folderName = folderName;
 
 			if (cfg.dryRun) {
 				const { args } = buildChildArgs(cfg, safe, exportDir);
 				record.status = STATUS.DRY_RUN;
 				record.reason = 'Dry run; nothing was exported.';
-				log.info('DRY RUN -- would create directory and run:', {
+				log.info('DRY RUN -- would export into:', {
 					exportDir,
+					replacesExisting: fs.existsSync(exportDir),
 					command: `node ${args.map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(' ')}`,
 				});
 				continue;
 			}
 
+			// Export into a temp folder, then swap. A failed run therefore leaves
+			// the existing folder exactly as it was rather than half-overwriting it.
+			const workDir = path.join(cfg.exportRoot, `.tmp_${folderName}_${runId}`);
 			try {
-				fs.mkdirSync(exportDir, { recursive: true });
+				fs.rmSync(workDir, { recursive: true, force: true });
+				fs.mkdirSync(workDir, { recursive: true });
 			} catch (err) {
 				record.status = STATUS.FAILED;
-				record.error = `Could not create export directory ${exportDir}: ${err.message}`;
+				record.error = `Could not create working directory ${workDir}: ${err.message}`;
 				summary.failed += 1;
 				log.error(record.error);
 				continue;
@@ -957,9 +1034,26 @@ async function main() {
 			// inside exportOrg is already converted into a status.
 			let outcome;
 			try {
-				outcome = await exportOrg(cfg, safe, exportDir, log.child(label));
+				outcome = await exportOrg(cfg, safe, workDir, log.child(label));
 			} catch (err) {
 				outcome = { status: STATUS.FAILED, attempts: [], exitCode: null, error: `Unexpected orchestrator error: ${err.message}` };
+			}
+
+			// Only a fully successful export is allowed to replace what is there.
+			if (outcome.status === STATUS.SUCCESS) {
+				try {
+					swapIntoPlace(workDir, exportDir, runId);
+				} catch (err) {
+					outcome = {
+						...outcome,
+						status: STATUS.FAILED,
+						error: `Export succeeded but could not be moved into place (${exportDir}): ${err.message}`,
+					};
+				}
+			}
+			if (outcome.status !== STATUS.SUCCESS) {
+				// Discard the partial export; the previous folder is untouched.
+				fs.rmSync(workDir, { recursive: true, force: true });
 			}
 			const orgEnd = new Date();
 
@@ -990,7 +1084,15 @@ async function main() {
 	if (!cfg.dryRun) {
 		log.info('-'.repeat(56));
 		pruneOldEntries(cfg.logRoot, cfg.logRetentionDays, log, 'log');
-		pruneOldEntries(cfg.exportRoot, cfg.exportRetentionDays, log, 'export');
+		// Export pruning applies ONLY to the per-run layout, where old entries are
+		// old run folders. Under per-org the entries ARE the live per-org folders,
+		// so age-based pruning would delete the export of any org that has not run
+		// recently -- exactly the org whose backup you would still want.
+		if (cfg.layout === 'per-run') {
+			pruneOldEntries(cfg.exportRoot, cfg.exportRetentionDays, log, 'export');
+		} else if (cfg.exportRetentionDays > 0) {
+			log.debug('exportRetentionDays is ignored under layout "per-org" -- each org keeps exactly one folder.');
+		}
 	}
 
 	// --- Summary ----------------------------------------------------------
@@ -1020,4 +1122,4 @@ main()
 		process.exitCode = EXIT.PREFLIGHT;
 	});
 
-module.exports = { STATUS, EXIT, CHILD_EXIT, makeRunId, sanitizeSegment, orgDirectoryName, classifyOrg, renderSummary };
+module.exports = { STATUS, EXIT, CHILD_EXIT, makeRunId, sanitizeSegment, orgDirectoryName, classifyOrg, renderSummary, swapIntoPlace };

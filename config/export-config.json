@@ -1,9 +1,13 @@
 {
   "_comment": "Effective settings for the scheduled cja_cj export. Keys starting with _ are ignored. Every key here is optional; anything omitted falls back to the defaults in lib/config.js. Relative paths resolve against the project root, never the working directory. Any value can be overridden at run time with an SFEXPORT_* environment variable (see README).",
 
-  "_comment_paths": "Where things live. Keep exports and logs off a synced/OneDrive folder: they are large and contain customer configuration.",
-  "exportRoot": "exports",
+  "_comment_paths": "Where things live. Keep exports and logs off a synced/OneDrive folder: they contain customer configuration.",
+  "exportRoot": "connectjunction-exports",
   "logRoot": "logs",
+
+  "_comment_layout": "per-org = one stable folder per org, replaced every run, so the export root always shows the current state of each org and nothing accumulates. No history: once tonight succeeds, last night is gone. per-run = a new timestamped folder each run, keeping history, pruned by exportRetentionDays. Either way the run exports into a temp folder and only swaps it into place on success, so a failed export never damages the folder already there. Tokens for orgFolderPattern: {alias} {orgId} {username} {usernamePrefix}.",
+  "layout": "per-org",
+  "orgFolderPattern": "cj-export_{alias}",
   "exportScript": "export-script.js",
   "cleanScript": "clean-json.js",
 
@@ -42,7 +46,7 @@
   "lockStaleMinutes": 180,
   "dryRun": false,
 
-  "_comment_housekeeping": "Retention is enforced at the end of each successful run. Set to 0 to disable pruning.",
+  "_comment_housekeeping": "Retention is enforced at the end of each run. 0 disables pruning. exportRetentionDays applies ONLY to layout per-run; under per-org each org keeps exactly one folder and nothing is pruned.",
   "logLevel": "info",
   "logRetentionDays": 30,
   "exportRetentionDays": 14
