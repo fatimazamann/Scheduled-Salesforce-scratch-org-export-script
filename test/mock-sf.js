@@ -60,6 +60,16 @@ if (cmd.startsWith('sobject describe')) {
 		case 'auth':
 			emit({ status: 1, name: 'RefreshTokenAuthError', message: 'expired access/refresh token' }, 1);
 			break;
+		case 'dead':
+			// What a deleted/expired scratch org actually returns: an HTML error
+			// page instead of JSON, surfaced by the CLI as ERROR_HTTP_420.
+			process.stdout.write(' \u00bb   Warning: @salesforce/cli update available from 2.118.20 to 2.149.9.\n');
+			emit({
+				status: 1,
+				name: 'ERROR_HTTP_420',
+				message: 'HTTP response contains html content.\nCheck that the org exists and can be reached.',
+			}, 1);
+			break;
 		case 'error':
 			emit({ status: 1, name: 'SomethingElse', message: 'kaboom' }, 1);
 			break;

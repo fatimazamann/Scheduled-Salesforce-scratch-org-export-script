@@ -680,6 +680,28 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 }
 
 
+// --- A deleted scratch org is reported as gone, not as an unknown error ------------
+{
+	const r = runScenario('DEAD deleted/expired org returns HTTP 420 -> named clearly, others continue', {
+		orgs: [
+			scratchOrg({ username: 'gone@example.com', alias: 'deleted-org', orgId: '00D000000000301AAA' }),
+			scratchOrg({ username: 'live@example.com', alias: 'live-org', orgId: '00D000000000302AAA' }),
+		],
+		orgFixtures: {
+			'gone@example.com': { describe: 'dead' },
+			'live@example.com': { describe: 'ok', export: 'ok' },
+		},
+	});
+	check('exit code 0 (a dead org is a skip, not a failure)', r.code === 0, `got ${r.code}`);
+	const dead = r.summary.orgs.find((o) => o.alias === 'deleted-org');
+	check('status SKIPPED_UNREACHABLE', dead.status === 'SKIPPED_UNREACHABLE', dead.status);
+	check('reason says the org is gone', /deleted or expired/.test(dead.reason), dead.reason);
+	check('reason suggests the cleanup command', /sf org list --clean/.test(dead.reason));
+	check('not reported as an unrecognised error', !/unrecognised/.test(dead.reason));
+	check('the CLI update nag is stripped', !/update available from/.test(dead.reason));
+	check('the healthy org still exported', r.summary.success === 1);
+}
+
 // --- Windows executable resolution -------------------------------------------------
 {
 	process.stdout.write('\n  EXE resolving the sf CLI on Windows (npm ships three shims)\n');
@@ -730,20 +752,24 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 	);
 
 	// Auto-discovery of the CLI's JS entry point removes cmd.exe from the path.
-	// NOTE: findCliEntryNear uses the platform's own path module, so these cases
-	// use POSIX paths -- on Windows the same logic runs against Windows paths.
-	const npmWin = '/c/Users/Cloud Junction/AppData/Roaming/npm';
+	// findCliEntryNear uses the platform's own path module, so the separators in
+	// its output differ between Windows and POSIX. Normalise both sides rather
+	// than asserting on one platform's spelling.
+	const norm = (p) => String(p || '').replace(/\\/g, '/');
+	const npmPrefix = '/c/Users/Cloud Junction/AppData/Roaming/npm';
+	const npmEntry = npmPrefix + '/node_modules/@salesforce/cli/bin/run.js';
 	check(
 		'finds run.js beside an npm-installed shim',
-		findCliEntryNear(npmWin + '/sf.cmd', (p) => p === npmWin + '/node_modules/@salesforce/cli/bin/run.js') ===
-			npmWin + '/node_modules/@salesforce/cli/bin/run.js'
+		norm(findCliEntryNear(npmPrefix + '/sf.cmd', (p) => norm(p) === npmEntry)) === npmEntry,
+		norm(findCliEntryNear(npmPrefix + '/sf.cmd', (p) => norm(p) === npmEntry))
 	);
+	const posixEntry = '/usr/local/lib/node_modules/@salesforce/cli/bin/run.js';
 	check(
 		'finds run.js under a POSIX npm prefix',
-		findCliEntryNear('/usr/local/bin/sf', (p) => p === '/usr/local/lib/node_modules/@salesforce/cli/bin/run.js') ===
-			'/usr/local/lib/node_modules/@salesforce/cli/bin/run.js'
+		norm(findCliEntryNear('/usr/local/bin/sf', (p) => norm(p) === posixEntry)) === posixEntry,
+		norm(findCliEntryNear('/usr/local/bin/sf', (p) => norm(p) === posixEntry))
 	);
-	check('handles a path containing spaces', findCliEntryNear(npmWin + '/sf.cmd', none) === null);
+	check('handles a path containing spaces', findCliEntryNear(npmPrefix + '/sf.cmd', none) === null);
 	check('returns null when no entry point is near', findCliEntryNear('/somewhere/sf.cmd', none) === null);
 }
 

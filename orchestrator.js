@@ -538,6 +538,21 @@ const AUTH_ERROR_MARKERS = [
 	'invalid_grant',
 ];
 
+/**
+ * A scratch org that has been deleted or has expired stops serving the API and
+ * returns a Salesforce HTML error page instead of JSON. The CLI surfaces that
+ * as ERROR_HTTP_420 with "HTTP response contains html content". It is not an
+ * authentication problem and not a missing package -- the org is simply gone --
+ * so it gets its own markers and a message that says so plainly.
+ */
+const DEAD_ORG_MARKERS = [
+	'ERROR_HTTP_420',
+	'HTTP response contains html content',
+	'Check that the org exists and can be reached',
+	'ENOTFOUND',
+	'getaddrinfo',
+];
+
 const MISSING_SOBJECT_MARKERS = [
 	'INVALID_TYPE',
 	'sObject type',
@@ -545,6 +560,15 @@ const MISSING_SOBJECT_MARKERS = [
 	'NOT_FOUND',
 	'Unknown sobject',
 ];
+
+/** Drop the CLI's own update nag so it does not pollute error messages. */
+function stripCliNoise(text) {
+	return String(text || '')
+		.split(/\r?\n/)
+		.filter((line) => !/^\s*[»>]/.test(line) && !/update available from/i.test(line))
+		.join('\n')
+		.trim();
+}
 
 function messageOf(res) {
 	const parts = [];
@@ -556,7 +580,7 @@ function messageOf(res) {
 		}
 	}
 	if (res.raw && res.raw.stderr) parts.push(res.raw.stderr);
-	return parts.filter(Boolean).join(' | ').slice(0, 2000);
+	return stripCliNoise(parts.filter(Boolean).join(' | ')).slice(0, 2000);
 }
 
 const includesAny = (haystack, needles) => {
@@ -604,6 +628,16 @@ async function checkOrgAndPackage(runner, org, cfg, log) {
 			appPresent: null,
 			status: STATUS.SKIPPED_UNREACHABLE,
 			reason: `Stored authentication is no longer usable: ${detail.slice(0, 300)}`,
+		};
+	}
+	if (includesAny(detail, DEAD_ORG_MARKERS)) {
+		return {
+			reachable: false,
+			appPresent: null,
+			status: STATUS.SKIPPED_UNREACHABLE,
+			reason:
+				'Org is not reachable -- it has most likely been deleted or expired. ' +
+				'Run `sf org list --clean` to drop dead scratch orgs from the local auth store.',
 		};
 	}
 	if (includesAny(detail, MISSING_SOBJECT_MARKERS)) {
