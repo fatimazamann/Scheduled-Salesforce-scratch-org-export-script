@@ -1,0 +1,49 @@
+{
+  "_comment": "Effective settings for the scheduled cja_cj export. Keys starting with _ are ignored. Every key here is optional; anything omitted falls back to the defaults in lib/config.js. Relative paths resolve against the project root, never the working directory. Any value can be overridden at run time with an SFEXPORT_* environment variable (see README).",
+
+  "_comment_paths": "Where things live. Keep exports and logs off a synced/OneDrive folder: they are large and contain customer configuration.",
+  "exportRoot": "exports",
+  "logRoot": "logs",
+  "exportScript": "export-script.js",
+  "cleanScript": "clean-json.js",
+
+  "_comment_cli": "Leave sfExecutable blank to resolve sf from PATH. On a machine where the scheduled account has a thin PATH, set the full path instead. sfCliEntry is the faster and safer option when you can find the CLI's run.js: it bypasses the sf.cmd shim so no shell is involved at all.",
+  "sfExecutable": "",
+  "sfCliEntry": "",
+  "sfCommandTimeoutSeconds": 120,
+
+  "_comment_what": "What gets exported. integrationType is applied to every org; any-to-any additionally exports cja_cj__Dataflow__c. connectorFilter [] means every connector. queryLimit must stay <= 200: Salesforce requires LIMIT <= 200 on FIELDS(ALL) queries.",
+  "integrationType": "any-to-any",
+  "connectorFilter": [],
+  "queryLimit": 200,
+
+  "_comment_appcheck": "Before running a full export we describe one packaged object. Metadata only, so an org with the package installed but zero records is still exported. Set enabled=false to export every reachable scratch org.",
+  "appCheck": {
+    "enabled": true,
+    "sobject": "cja_cj__CJ_Connector__c"
+  },
+
+  "_comment_orgfilter": "Empty include lists mean 'every discovered scratch org'. minHoursUntilExpiry skips orgs that would expire mid-run; 0 skips only orgs that have already expired.",
+  "orgFilter": {
+    "includeAliases": [],
+    "excludeAliases": [],
+    "includeUsernames": [],
+    "excludeUsernames": [],
+    "minHoursUntilExpiry": 0
+  },
+
+  "_comment_perorg": "Deterministic per-org overrides, keyed by username or alias. Use this instead of inferring settings per org. Example: { \"test-abc@example.com\": { \"integrationType\": \"salesforce-to-any\" }, \"qa-sandbox-clone\": { \"skip\": true, \"reason\": \"owned by QA, exported separately\" } }",
+  "perOrg": {},
+
+  "_comment_execution": "Sequential by design. maxRetries applies ONLY to failures the child classified as transient (exit code 6) or to a child we timed out; deterministic failures are never retried.",
+  "maxRetries": 1,
+  "retryBackoffSeconds": [15, 45],
+  "childTimeoutSeconds": 900,
+  "lockStaleMinutes": 180,
+  "dryRun": false,
+
+  "_comment_housekeeping": "Retention is enforced at the end of each successful run. Set to 0 to disable pruning.",
+  "logLevel": "info",
+  "logRetentionDays": 30,
+  "exportRetentionDays": 14
+}

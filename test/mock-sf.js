@@ -1,0 +1,113 @@
+#!/usr/bin/env node
+'use strict';
+/**
+ * A stand-in for the Salesforce CLI, driven by a JSON fixture. Used by
+ * test/run-tests.js so the whole orchestration path can be exercised without a
+ * real org. Not part of the shipped tool.
+ *
+ * Fixture: MOCK_SF_FIXTURE=/path/to/fixture.json
+ */
+const fs = require('fs');
+const path = require('path');
+
+const fixture = JSON.parse(fs.readFileSync(process.env.MOCK_SF_FIXTURE, 'utf8'));
+const argv = process.argv.slice(2);
+
+const flag = (name) => {
+	const i = argv.indexOf(name);
+	return i === -1 ? null : argv[i + 1];
+};
+const allFlags = (name) => argv.reduce((acc, a, i) => (a === name ? acc.concat(argv[i + 1]) : acc), []);
+const has = (name) => argv.includes(name);
+
+const emit = (obj, code = 0) => {
+	process.stdout.write(JSON.stringify(obj));
+	process.exit(code);
+};
+
+// Record every invocation so tests can assert on what was (and was not) called.
+if (process.env.MOCK_SF_CALLLOG) {
+	fs.appendFileSync(process.env.MOCK_SF_CALLLOG, JSON.stringify(argv) + '\n');
+}
+
+if (has('--version')) {
+	process.stdout.write((fixture.version || '@salesforce/cli/2.0.0 mock') + '\n');
+	process.exit(0);
+}
+
+const cmd = argv.filter((a) => !a.startsWith('-')).slice(0, 3).join(' ');
+
+if (cmd.startsWith('org list')) {
+	emit(fixture.orgList);
+}
+
+const org = (username) => (fixture.orgs && fixture.orgs[username]) || {};
+
+if (cmd.startsWith('org display')) {
+	const o = org(flag('--target-org'));
+	if (o.display === 'auth') {
+		emit({ status: 1, name: 'NamedOrgNotFoundError', message: 'No authorization information found for this org.' }, 1);
+	}
+	emit({ status: 0, result: { username: flag('--target-org'), id: '00Dmock' } });
+}
+
+if (cmd.startsWith('sobject describe')) {
+	const o = org(flag('--target-org'));
+	switch (o.describe) {
+		case 'missing':
+			emit({ status: 1, name: 'INVALID_TYPE', message: `sObject type '${flag('--sobject')}' is not supported.` }, 1);
+			break;
+		case 'auth':
+			emit({ status: 1, name: 'RefreshTokenAuthError', message: 'expired access/refresh token' }, 1);
+			break;
+		case 'error':
+			emit({ status: 1, name: 'SomethingElse', message: 'kaboom' }, 1);
+			break;
+		default:
+			emit({ status: 0, result: { name: flag('--sobject'), fields: [] } });
+	}
+}
+
+if (cmd.startsWith('org login')) {
+	// The whole point of the design is that this must never be reached in a
+	// scheduled run. Tests assert on the absence of this marker.
+	fs.appendFileSync(process.env.MOCK_SF_CALLLOG || '/dev/null', 'BROWSER_LOGIN_ATTEMPTED\n');
+	emit({ status: 0, result: {} });
+}
+
+if (cmd.startsWith('data export tree')) {
+	const username = flag('--target-org');
+	const o = org(username);
+	if (o.export === 'fail') {
+		emit({ status: 1, name: 'MalformedQuery', message: 'MALFORMED_QUERY: unexpected token' }, 1);
+	}
+	if (o.export === 'transient') {
+		emit({ status: 1, name: 'NetworkError', message: 'socket hang up (ECONNRESET)' }, 1);
+	}
+	const dir = flag('--output-dir');
+	fs.mkdirSync(dir, { recursive: true });
+	const queries = allFlags('--query');
+	const counts = o.records || {};
+	const files = [];
+	queries.forEach((q, i) => {
+		// The outer object always ends in __c; subquery relationships end in __r.
+		const m = [...q.matchAll(/FROM\s+(cja_cj__[A-Za-z0-9_]*__c)\b/g)].pop();
+		const obj = (m && m[1]) || `Object${i}`;
+		const n = counts[obj] !== undefined ? counts[obj] : 2;
+		const records = Array.from({ length: n }, (_, k) => ({
+			attributes: { type: obj, referenceId: `${obj}Ref${k}` },
+			Name: `${obj} ${k}`,
+			CreatedDate: '2026-01-01T00:00:00.000Z',
+			LastModifiedDate: '2026-01-02T00:00:00.000Z',
+			IsDeleted: false,
+			cja_cj__Connector_Metadata_Name__c: 'strip-me',
+		}));
+		const file = `${obj}s.json`;
+		fs.writeFileSync(path.join(dir, file), JSON.stringify({ records }, null, 2));
+		files.push(file);
+	});
+	fs.writeFileSync(path.join(dir, 'export-demo-plan.json'), JSON.stringify(files, null, 2));
+	emit({ status: 0, result: files.map((f) => ({ file: f })) });
+}
+
+emit({ status: 1, name: 'UnknownCommand', message: `mock-sf does not implement: ${argv.join(' ')}` }, 1);

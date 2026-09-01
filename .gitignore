@@ -1,0 +1,25 @@
+# ---------------------------------------------------------------------------
+# Exported Salesforce data and run logs must never be committed.
+#
+# The exports contain customer/application configuration -- connector setups,
+# object mappings, message template bodies -- which is not safe to assume is
+# non-sensitive. Message templates in particular routinely contain real names,
+# addresses and business rules. Treat exports/ as customer data on disk.
+# ---------------------------------------------------------------------------
+exports/
+logs/
+
+# Run lock (also covered by logs/, listed explicitly for clarity)
+*.lock
+.scheduled-export.lock
+
+# Machine-local PATH / env overrides for the scheduled account
+set-env.cmd
+
+# Local config overrides that should not be shared
+config/export-config.local.json
+
+# Node
+node_modules/
+npm-debug.log*
+.DS_Store

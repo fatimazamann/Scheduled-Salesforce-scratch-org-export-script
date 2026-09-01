@@ -1,0 +1,14 @@
+{
+  "name": "salesforce-scheduled-export",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Scheduled export of cja_cj application configuration from locally authenticated Salesforce scratch orgs.",
+  "main": "orchestrator.js",
+  "scripts": {
+    "export": "node orchestrator.js",
+    "dry-run": "node orchestrator.js --dry-run",
+    "test": "node test/run-tests.js"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {}
+}
