@@ -131,7 +131,7 @@ opts back in to `sf org login web` for Sandbox and Production only.
 node test\run-tests.js
 ```
 
-128 assertions covering the full test matrix against a mock Salesforce CLI: org
+148 assertions covering the full test matrix against a mock Salesforce CLI: org
 discovery and filtering, expiry, package detection, failure isolation, retry
 policy, locking, dry run, paths with spaces, SOQL escaping, Windows command-line
 escaping, and secret redaction. No org and no network required.

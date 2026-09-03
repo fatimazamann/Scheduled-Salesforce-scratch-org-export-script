@@ -407,12 +407,17 @@ function detectTruncation(dir) {
 		if (!node || typeof node !== 'object') return;
 		if (Array.isArray(node.records)) {
 			const n = node.records.length;
-			if (n >= rowLimit || n >= EXPORT_TREE_MAX_RECORDS) {
+			// Only an EXACT match on a limit is evidence of truncation. A count
+			// merely greater than rowLimit is normal and expected: `--plan`
+			// flattens subquery children into their own file, and the per-parent
+			// LIMIT applies to each parent separately, so the file total is a sum
+			// across parents and has no relationship to the limit.
+			if (n === rowLimit || n === EXPORT_TREE_MAX_RECORDS) {
 				findings.push({
 					file: filename,
 					path: pathLabel,
 					count: n,
-					limit: n >= EXPORT_TREE_MAX_RECORDS ? EXPORT_TREE_MAX_RECORDS : rowLimit,
+					limit: n === EXPORT_TREE_MAX_RECORDS ? EXPORT_TREE_MAX_RECORDS : rowLimit,
 				});
 			}
 			node.records.forEach((rec, i) => {
@@ -537,8 +542,10 @@ async function main() {
 	const truncation = detectTruncation(directoryPath);
 	for (const t of truncation) {
 		warn(
-			`Possible truncation in ${t.file} at ${t.path}: ${t.count} record(s) returned, ` +
-				`exactly at the ${t.limit}-record limit. Configuration may be missing from this backup.`
+			`Possible truncation in ${t.file} at ${t.path}: exactly ${t.count} record(s) returned, ` +
+				`which is the ${t.limit}-record query limit. This is either a coincidence or the query ` +
+				`was cut off -- verify with: sf data query --target-org ${userName} ` +
+				`--query "SELECT COUNT() FROM <object>"`
 		);
 	}
 
