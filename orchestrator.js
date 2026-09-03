@@ -382,15 +382,18 @@ async function preflight(cfg, log) {
 		} else {
 			try {
 				const text = fs.readFileSync(cfg.metadata.manifest, 'utf8');
-				if (!/<Package\b/i.test(text) || !/<types>/i.test(text)) {
+				// Tolerate whitespace inside the tags. A formatter (Prettier does
+				// this) wraps long member names as `<members\n  >Name</members\n>`,
+				// which is valid XML but does not match a naive `<members>`.
+				if (!/<Package\b/i.test(text) || !/<types\s*>/i.test(text)) {
 					fail(
 						`${cfg.metadata.manifest} does not look like a metadata manifest ` +
 							`(no <Package> / <types> element). A retrieve driven by it would silently return nothing.`
 					);
 				} else {
-					const types = (text.match(/<name>/gi) || []).length;
-					const members = (text.match(/<members>/gi) || []).length;
-					const wildcards = (text.match(/<members>\s*\*\s*<\/members>/gi) || []).length;
+					const types = (text.match(/<name\s*>/gi) || []).length;
+					const members = (text.match(/<members[\s>]/gi) || []).length;
+					const wildcards = (text.match(/<members\s*>\s*\*\s*<\/members\s*>/gi) || []).length;
 					log.info(
 						`Metadata manifest: ${path.basename(cfg.metadata.manifest)} ` +
 							`(${types} type(s), ${members} member entr${members === 1 ? 'y' : 'ies'}, ${wildcards} wildcard(s))`

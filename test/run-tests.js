@@ -611,6 +611,33 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 		check('explains why', /does not look like a metadata manifest/.test(r.stdout + r.stderr + r.logText));
 	}
 
+	// MD6b -- the real manifest is Prettier-formatted, which wraps long member
+	// names as `<members\n  >Name</members\n>`. Valid XML, but it defeats a
+	// naive /<members>/ match, so the counts must not depend on one.
+	{
+		const wrapped = path.join(mdFixtures, 'wrapped.xml');
+		fs.writeFileSync(
+			wrapped,
+			'<?xml version="1.0" encoding="UTF-8"?>\n' +
+				'<Package xmlns="http://soap.sforce.com/2006/04/metadata">\n' +
+				'\t<types>\n' +
+				'\t\t<members>Short__c.Field__c</members>\n' +
+				'\t\t<members\n\t\t\t>Object__c.A_Very_Long_Field_Name_That_Got_Wrapped__c</members\n\t\t>\n' +
+				'\t\t<name>CustomField</name>\n' +
+				'\t</types>\n' +
+				'\t<version>63.0</version>\n' +
+				'</Package>\n'
+		);
+		const r = runScenario('MD6b Prettier-wrapped manifest -> accepted and counted correctly', {
+			orgs: [scratchOrg({ username: 'pw@example.com', alias: 'wrap-org', orgId: '00D000000000094AAA' })],
+			orgFixtures: { 'pw@example.com': { describe: 'ok', export: 'ok', metadata: 'ok' } },
+			config: Object.assign(mdConfig({ manifest: wrapped }), { logLevel: 'debug' }),
+		});
+		check('accepted as a manifest', r.code === 0, `got ${r.code}\n${r.stderr.slice(-400)}`);
+		check('both members counted, not just the unwrapped one', /2 member entries/.test(r.logText), r.logText.match(/Metadata manifest:.*/) || '');
+		check('the wrapped name is not miscounted as a wildcard', /0 wildcard/.test(r.logText));
+	}
+
 	// MD7 -- regression: with metadata off, nothing about the old behaviour
 	// changes and no retrieve is ever issued.
 	{
