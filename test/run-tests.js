@@ -57,7 +57,7 @@ function scratchOrg(over) {
 }
 
 /** Build a sandbox for one scenario and run the orchestrator inside it. */
-function runScenario(name, { orgs = [], orgFixtures = {}, config = {}, args = [], rootName = null, env = {}, preRun = null }) {
+function runScenario(name, { orgs = [], orgFixtures = {}, config = {}, args = [], rootName = null, env = {}, preRun = null, extraBuckets = {} }) {
 	process.stdout.write(`\n  ${name}\n`);
 
 	const base = fs.mkdtempSync(path.join(os.tmpdir(), 'sfexp-'));
@@ -69,7 +69,10 @@ function runScenario(name, { orgs = [], orgFixtures = {}, config = {}, args = []
 		fixturePath,
 		JSON.stringify({
 			version: '@salesforce/cli/2.99.0 mock node-v22',
-			orgList: { status: 0, result: { scratchOrgs: orgs, nonScratchOrgs: [], sandboxes: [], devHubs: [], other: [] } },
+			orgList: {
+				status: 0,
+				result: Object.assign({ scratchOrgs: orgs, nonScratchOrgs: [], sandboxes: [], devHubs: [], other: [] }, extraBuckets),
+			},
 			orgs: orgFixtures,
 		})
 	);
@@ -679,6 +682,64 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 	check('path separator rejected', threw2 instanceof ConfigError, threw2 && threw2.message);
 }
 
+
+// --- Scratch orgs the CLI never flagged --------------------------------------------
+{
+	process.stdout.write('\n  URL identifying a scratch org by its instance URL\n');
+	const { scratchOrgBasis } = require('../orchestrator');
+	const scratchUrl = 'https://platform-agility-854-dev-ed.scratch.my.salesforce.com';
+
+	check('isScratch flag wins when present', scratchOrgBasis({ isScratch: true }, 'other') === 'isScratch flag');
+	check('scratchOrgs bucket counts', scratchOrgBasis({}, 'scratchOrgs') === 'scratchOrgs bucket');
+	check(
+		'unflagged org on a scratch domain is recognised',
+		scratchOrgBasis({ instanceUrl: scratchUrl }, 'nonScratchOrgs') === 'scratch instance URL',
+		scratchOrgBasis({ instanceUrl: scratchUrl }, 'nonScratchOrgs')
+	);
+
+	// The whole point of the URL check is that it cannot catch anything unsafe.
+	check('production is never matched', scratchOrgBasis({ instanceUrl: 'https://cloudjunction.my.salesforce.com' }, 'nonScratchOrgs') === null);
+	check('a sandbox domain is never matched', scratchOrgBasis({ instanceUrl: 'https://acme--uat.sandbox.my.salesforce.com' }, 'other') === null);
+	check('a dev edition domain is never matched', scratchOrgBasis({ instanceUrl: 'https://acme.develop.my.salesforce.com' }, 'other') === null);
+	check('an explicit sandbox is refused even on a scratch URL', scratchOrgBasis({ isSandbox: true, instanceUrl: scratchUrl }, 'other') === null);
+	check('an explicit Dev Hub is refused even on a scratch URL', scratchOrgBasis({ isDevHub: true, instanceUrl: scratchUrl }, 'other') === null);
+	check('a lookalike hostname is not matched', scratchOrgBasis({ instanceUrl: 'https://scratch.my.salesforce.com.evil.example' }, 'other') === null);
+	check('missing instanceUrl is safe', scratchOrgBasis({}, 'other') === null);
+	check('garbage instanceUrl is safe', scratchOrgBasis({ instanceUrl: 'not a url' }, 'other') === null);
+}
+
+// --- Discovery picks up an unflagged scratch org end to end -------------------------
+{
+	const r = runScenario('URL2 org with no isScratch flag but a scratch URL -> discovered and exported', {
+		orgs: [scratchOrg({ username: 'flagged@example.com', alias: 'flagged', orgId: '00D000000000401AAA' })],
+		orgFixtures: {
+			'flagged@example.com': { describe: 'ok', export: 'ok' },
+			'unflagged@example.com': { describe: 'ok', export: 'ok' },
+		},
+		extraBuckets: {
+			nonScratchOrgs: [
+				{
+					username: 'unflagged@example.com',
+					alias: 'logged-in-by-hand',
+					orgId: '00D000000000402AAA',
+					instanceUrl: 'https://nosoftware-ruby-8756-dev-ed.scratch.my.salesforce.com',
+				},
+				{
+					username: 'prod@corp.com',
+					alias: 'production',
+					orgId: '00D000000000403AAA',
+					instanceUrl: 'https://cloudjunction.my.salesforce.com',
+				},
+			],
+		},
+	});
+	check('exit code 0', r.code === 0, `got ${r.code}`);
+	check('both scratch orgs discovered', r.summary && r.summary.discovered === 2, r.summary && String(r.summary.discovered));
+	check('the unflagged org was exported', r.summary.orgs.some((o) => o.alias === 'logged-in-by-hand' && o.status === 'SUCCESS'));
+	check('production was NOT discovered', !r.summary.orgs.some((o) => o.alias === 'production'));
+	check('production was never contacted', !/prod@corp\.com/.test(r.calls));
+	check('log explains the URL-based identification', /identified as scratch by their instance URL/.test(r.logText));
+}
 
 // --- A deleted scratch org is reported as gone, not as an unknown error ------------
 {

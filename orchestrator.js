@@ -81,6 +81,48 @@ function makeRunId(date = new Date()) {
 	);
 }
 
+/**
+ * Scratch orgs live on a distinctive host: <name>.scratch.my.salesforce.com.
+ * Sandboxes use .sandbox.my.salesforce.com, Developer Edition orgs use
+ * .develop.my.salesforce.com, and production uses a bare .my.salesforce.com --
+ * so this pattern cannot match anything we must not touch.
+ */
+const SCRATCH_HOST_RE = /\.scratch\.my\.salesforce\.com$/i;
+
+function hostOf(url) {
+	try {
+		return new URL(String(url)).hostname;
+	} catch (_) {
+		return null;
+	}
+}
+
+/**
+ * Decide whether an org is a scratch org, and say on what evidence.
+ *
+ * The CLI only sets `isScratch` for orgs it created itself with
+ * `sf org create scratch`. An org someone authenticated with `sf org login web`
+ * or an auth URL carries no such flag, even though it is plainly a scratch org
+ * -- which silently excluded real orgs from the backup. The instance URL is the
+ * fallback: it is set on every org, comes from Salesforce rather than local
+ * bookkeeping, and is specific enough that it cannot misfire.
+ *
+ * Returns the basis as a string, or null when the org is not a scratch org.
+ */
+function scratchOrgBasis(org, bucket) {
+	if (!org || typeof org !== 'object') return null;
+	// An explicit "this is a sandbox / Dev Hub" always wins over any inference.
+	if (org.isSandbox === true || org.isDevHub === true) return null;
+
+	if (org.isScratch === true) return 'isScratch flag';
+	if (bucket === 'scratchOrgs') return 'scratchOrgs bucket';
+
+	const host = hostOf(org.instanceUrl);
+	if (host && SCRATCH_HOST_RE.test(host)) return 'scratch instance URL';
+
+	return null;
+}
+
 const WINDOWS_RESERVED = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
 
 /**
@@ -400,16 +442,11 @@ async function discoverScratchOrgs(runner, log) {
 	const seen = new Map(); // username -> org
 
 	const consider = (org, bucket) => {
-		if (!org || typeof org !== 'object') return;
-		// Defensive: treat "is it a scratch org" as a positive assertion. An org
-		// with no isScratch flag that is not in the scratchOrgs bucket is not
-		// assumed to be one.
-		const isScratch = org.isScratch === true || bucket === 'scratchOrgs';
-		if (!isScratch) return;
-		if (org.isSandbox === true || org.isDevHub === true) return; // never both, but be sure
+		const basis = scratchOrgBasis(org, bucket);
+		if (!basis) return;
 		const key = org.username || org.orgId || org.alias;
 		if (!key) return;
-		if (!seen.has(key)) seen.set(key, { ...org, _bucket: bucket });
+		if (!seen.has(key)) seen.set(key, { ...org, _bucket: bucket, _scratchBasis: basis });
 	};
 
 	if (Array.isArray(result.scratchOrgs)) {
@@ -423,6 +460,18 @@ async function discoverScratchOrgs(runner, log) {
 	}
 
 	const orgs = [...seen.values()];
+
+	// Surface orgs the CLI did not flag, so it is obvious why they are included.
+	const byUrl = orgs.filter((o) => o._scratchBasis === 'scratch instance URL');
+	if (byUrl.length) {
+		log.info(
+			`${byUrl.length} org(s) identified as scratch by their instance URL rather than by the CLI's ` +
+				`isScratch flag. That flag is only set for orgs created locally with \`sf org create scratch\`; ` +
+				`one authenticated with \`sf org login web\` or an auth URL has no flag to read.`,
+			{ orgs: byUrl.map((o) => o.alias || o.username) }
+		);
+	}
+
 	log.info(`Discovered ${orgs.length} scratch org(s).`, {
 		buckets: Object.fromEntries(
 			Object.entries(result)
@@ -1188,4 +1237,4 @@ main()
 		process.exitCode = EXIT.PREFLIGHT;
 	});
 
-module.exports = { STATUS, EXIT, CHILD_EXIT, makeRunId, sanitizeSegment, orgDirectoryName, classifyOrg, renderSummary, swapIntoPlace };
+module.exports = { STATUS, EXIT, CHILD_EXIT, makeRunId, sanitizeSegment, orgDirectoryName, classifyOrg, renderSummary, swapIntoPlace, scratchOrgBasis };
