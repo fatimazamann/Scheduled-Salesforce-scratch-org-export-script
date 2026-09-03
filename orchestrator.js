@@ -263,6 +263,12 @@ function parseArgs(argv) {
 			case '--no-app-check':
 				out.overrides.appCheck = { enabled: false };
 				break;
+			case '--metadata':
+				out.overrides.metadata = { enabled: true };
+				break;
+			case '--no-metadata':
+				out.overrides.metadata = { enabled: false };
+				break;
 			case '--help':
 			case '-h':
 				out.help = true;
@@ -283,6 +289,9 @@ scheduled-export.bat [options]      (or: node orchestrator.js [options])
   --run-id <id>          Override the generated run identifier.
   --org <user-or-alias>  Restrict the run to this org. Repeatable.
   --no-app-check         Skip the cja_cj package check for this run.
+  --metadata             Retrieve metadata for this run (needs a manifest at
+                         metadata.manifest).
+  --no-metadata          Skip the metadata retrieve for this run.
   --log-level <level>    debug | info | warn | error
   -h, --help             Show this help.
 
@@ -358,6 +367,46 @@ async function preflight(cfg, log) {
 		['cleanScript', cfg.cleanScript],
 	]) {
 		if (!fs.existsSync(p)) fail(`Required script missing (${label}): ${p}`);
+	}
+
+	// --- Metadata manifest -------------------------------------------------
+	// Checked here, once, rather than per org: a missing manifest is a setup
+	// error and should stop the run before any org is touched, not produce the
+	// same failure six times over.
+	if (cfg.metadata && cfg.metadata.enabled) {
+		if (!fs.existsSync(cfg.metadata.manifest)) {
+			fail(
+				`Metadata export is enabled but the manifest was not found: ${cfg.metadata.manifest}. ` +
+					`Copy your package.xml there, or set metadata.enabled to false in the config.`
+			);
+		} else {
+			try {
+				const text = fs.readFileSync(cfg.metadata.manifest, 'utf8');
+				if (!/<Package\b/i.test(text) || !/<types>/i.test(text)) {
+					fail(
+						`${cfg.metadata.manifest} does not look like a metadata manifest ` +
+							`(no <Package> / <types> element). A retrieve driven by it would silently return nothing.`
+					);
+				} else {
+					const types = (text.match(/<name>/gi) || []).length;
+					const members = (text.match(/<members>/gi) || []).length;
+					const wildcards = (text.match(/<members>\s*\*\s*<\/members>/gi) || []).length;
+					log.info(
+						`Metadata manifest: ${path.basename(cfg.metadata.manifest)} ` +
+							`(${types} type(s), ${members} member entr${members === 1 ? 'y' : 'ies'}, ${wildcards} wildcard(s))`
+					);
+					if (!wildcards) {
+						log.debug(
+							'This manifest names every component explicitly, so anything created in an org ' +
+								'after the manifest was written will not be backed up. Regenerate it periodically, ' +
+								'or switch the types you want tracked to <members>*</members>.'
+						);
+					}
+				}
+			} catch (err) {
+				fail(`Cannot read the metadata manifest ${cfg.metadata.manifest}: ${err.message}`);
+			}
+		}
 	}
 
 	// --- Writable directories --------------------------------------------
@@ -720,6 +769,32 @@ async function checkOrgAndPackage(runner, org, cfg, log) {
 // Child invocation
 // ---------------------------------------------------------------------------
 
+/**
+ * Lift the metadata block out of the child's _export-summary.json. Everything
+ * here is best-effort: a missing or malformed summary means "we don't know",
+ * never a failed run.
+ */
+function readChildMetadataResult(workDir) {
+	try {
+		const parsed = JSON.parse(fs.readFileSync(path.join(workDir, '_export-summary.json'), 'utf8'));
+		const md = parsed && parsed.metadata;
+		if (!md || typeof md !== 'object') return null;
+		// "Metadata was not requested" is not a result worth carrying into the
+		// run summary; it would just add a noise line to every org.
+		if (md.status === 'SKIPPED') return null;
+		return {
+			status: md.status || 'UNKNOWN',
+			componentCount: md.componentCount,
+			fileCount: md.fileCount,
+			durationMs: md.durationMs,
+			warnings: Array.isArray(md.warnings) ? md.warnings : [],
+			error: md.error || null,
+		};
+	} catch (_) {
+		return null;
+	}
+}
+
 function buildChildArgs(cfg, org, exportDir) {
 	const perOrg = cfg.perOrg[org.username] || (org.alias ? cfg.perOrg[org.alias] : null) || {};
 	const integrationType = perOrg.integrationType !== undefined ? perOrg.integrationType : cfg.integrationType;
@@ -751,7 +826,37 @@ function buildChildArgs(cfg, org, exportDir) {
 	else if (cfg.sfCliEntry) args.push('--sf-cli-entry', cfg.sfCliEntry);
 	if (cfg.cleanScript) args.push('--clean-script', cfg.cleanScript);
 
-	return { args, integrationType, connectors };
+	// Metadata is opt-in and per-org overridable: an org can turn it off (or a
+	// different manifest on) without a second config file.
+	const md = cfg.metadata || {};
+	const mdEnabled = perOrg.metadata && perOrg.metadata.enabled !== undefined ? perOrg.metadata.enabled : md.enabled;
+	const mdManifest = (perOrg.metadata && perOrg.metadata.manifest) || md.manifest;
+	if (mdEnabled && mdManifest) {
+		args.push('--metadata-manifest', mdManifest);
+		args.push('--metadata-subdir', md.outputSubdir || 'metadata');
+		args.push('--metadata-project', md.projectDir);
+		if (md.namespace) args.push('--metadata-namespace', md.namespace);
+		if (md.apiVersion) args.push('--metadata-api-version', String(md.apiVersion));
+		args.push('--metadata-timeout', String(md.timeoutSeconds || 900));
+		if (md.failureIsFatal) args.push('--metadata-required');
+	}
+
+	return { args, integrationType, connectors, metadataEnabled: Boolean(mdEnabled && mdManifest) };
+}
+
+/**
+ * The child's wall clock is data export + clean + (optionally) a metadata
+ * retrieve, and a retrieve of a few hundred components is minutes on its own.
+ * Killing the child at childTimeoutSeconds while the retrieve is still running
+ * would throw away a data export that had already succeeded, so the metadata
+ * budget is ADDED to the child budget rather than shared with it.
+ */
+function effectiveChildTimeoutSeconds(cfg) {
+	const md = cfg.metadata || {};
+	const extra = md.enabled && md.manifest ? Number(md.timeoutSeconds) || 900 : 0;
+	// +60s of headroom so our timeout always fires after the child's own, which
+	// exits cleanly with a status instead of being killed mid-write.
+	return cfg.childTimeoutSeconds + (extra ? extra + 60 : 0);
 }
 
 async function runChildOnce(cfg, childArgs, log) {
@@ -759,7 +864,7 @@ async function runChildOnce(cfg, childArgs, log) {
 	// same Node the parent did, regardless of PATH.
 	const res = await sfcli.run(process.execPath, childArgs, {
 		cwd: cfg.projectRoot,
-		timeoutMs: cfg.childTimeoutSeconds * 1000,
+		timeoutMs: effectiveChildTimeoutSeconds(cfg) * 1000,
 		onStdoutLine: (line) => line.trim() && log.info(`  | ${line}`),
 		onStderrLine: (line) => line.trim() && log.warn(`  | ${line}`),
 	});
@@ -820,7 +925,7 @@ async function exportOrg(cfg, org, exportDir, log) {
 				attempts,
 				exitCode: res.code,
 				error: res.timedOut
-					? `Child timed out after ${cfg.childTimeoutSeconds}s.`
+					? `Child timed out after ${effectiveChildTimeoutSeconds(cfg)}s.`
 					: `Child exited ${res.code} (${Object.keys(CHILD_EXIT).find((k) => CHILD_EXIT[k] === res.code) || 'UNKNOWN'}). ${tail}`,
 				integrationType,
 				connectors,
@@ -883,6 +988,19 @@ function renderSummary(summary) {
 			const label = (o.alias || o.username || o.orgId || '?').padEnd(width);
 			const detail = o.status === STATUS.SUCCESS ? formatDuration(o.durationMs) : o.reason || o.error || '';
 			lines.push(`  ${o.status.padEnd(26)} ${label}  ${String(detail).split('\n')[0].slice(0, 90)}`);
+			if (o.metadata) {
+				// Called out on its own line rather than folded into the status:
+				// the export can be a clean success while the metadata beside it
+				// is not, and that combination must be visible at a glance.
+				const md = o.metadata;
+				const note =
+					md.status === 'FAILED'
+						? `FAILED -- ${String(md.error || '').split('\n')[0].slice(0, 70)}`
+						: `${md.componentCount != null ? `${md.componentCount} components, ` : ''}` +
+							`${md.fileCount != null ? `${md.fileCount} files` : ''}` +
+							`${md.warnings && md.warnings.length ? `, ${md.warnings.length} manifest warning(s)` : ''}`;
+				lines.push(`  ${' '.repeat(26)} ${' '.repeat(width)}  metadata: ${note}`);
+			}
 		}
 		lines.push('');
 	}
@@ -1152,6 +1270,24 @@ async function main() {
 				outcome = await exportOrg(cfg, safe, workDir, log.child(label));
 			} catch (err) {
 				outcome = { status: STATUS.FAILED, attempts: [], exitCode: null, error: `Unexpected orchestrator error: ${err.message}` };
+			}
+
+			// The child records what happened to the metadata retrieve in its own
+			// summary file rather than in an exit code, precisely so that a
+			// metadata problem cannot be mistaken for an export failure. Read it
+			// back here, while the work directory still exists.
+			if (outcome.status === STATUS.SUCCESS) {
+				record.metadata = readChildMetadataResult(workDir);
+				if (record.metadata && record.metadata.status === 'FAILED') {
+					log.warn(
+						`Data export succeeded but the metadata retrieve did not: ${record.metadata.error || 'no detail'}`
+					);
+				} else if (record.metadata && record.metadata.warnings && record.metadata.warnings.length) {
+					log.warn(
+						`Metadata retrieved with ${record.metadata.warnings.length} manifest warning(s); ` +
+							`those components are listed in the manifest but absent from the org.`
+					);
+				}
 			}
 
 			// Only a fully successful export is allowed to replace what is there.

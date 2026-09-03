@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  EXAMPLE ONLY. This file is not used by the exporter.
+
+  metadata.manifest points at config/package.xml. Put your own, known-good
+  package.xml there:
+
+      copy "C:\path\to\your\package.xml" "C:\tools\salesforce-export\config\package.xml"
+
+  then set metadata.enabled to true in config/export-config.json.
+
+  ---------------------------------------------------------------------------
+  WHY YOU MIGHT PREFER WILDCARDS
+
+  A manifest that names every component explicitly only ever retrieves what it
+  named. Anything created in an org afterwards -- a new Apex class, a new
+  object, a new flow -- is silently absent from the backup, and nothing in the
+  run output says so, because the retrieve succeeded exactly as instructed.
+
+  <members>*</members> asks for every component of that type instead, so the
+  manifest cannot go stale. It costs a longer retrieve and a larger folder.
+
+  One thing that is NOT a gap: fields, list views, record types and web links
+  are children of CustomObject and come back whenever their object is
+  retrieved, whether or not they are listed individually. A field added to an
+  object your manifest already names IS in the backup.
+
+  Verify any manifest before scheduling it, because an invalid type name fails
+  the whole retrieve:
+
+      cd metadata-project
+      sf project retrieve start --manifest ..\config\package.xml ^
+        --target-org <alias> --output-dir ..\_manifest-test
+  ---------------------------------------------------------------------------
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>*</members>
+        <name>ApexClass</name>
+    </types>
+    <types>
+        <members>*</members>
+        <name>ApexTrigger</name>
+    </types>
+    <types>
+        <members>*</members>
+        <name>AuraDefinitionBundle</name>
+    </types>
+    <types>
+        <members>*</members>
+        <name>AuthProvider</name>
+    </types>
+    <types>
+        <members>*</members>
+        <name>ContentAsset</name>
+    </types>
+    <types>
+        <members>*</members>
+        <name>CustomApplication</name>
+    </types>
+    <types>
+        <members>*</members>
+        <name>CustomMetadata</name>
+    </types>
+    <!-- CustomObject brings its own fields, list views, record types,
+         validation rules and web links with it. -->
+    <types>
+        <members>*</members>
+        <name>CustomObject</name>
+    </types>
+    <types>
+        <members>*</members>
+        <name>CustomTab</name>
+    </types>
+    <types>
+        <members>*</members>
+        <name>ExternalCredential</name>
+    </types>
+    <types>
+        <members>*</members>
+        <name>FlexiPage</name>
+    </types>
+    <types>
+        <members>*</members>
+        <name>Flow</name>
+    </types>
+    <types>
+        <members>*</members>
+        <name>Layout</name>
+    </types>
+    <types>
+        <members>*</members>
+        <name>LightningComponentBundle</name>
+    </types>
+    <types>
+        <members>*</members>
+        <name>NamedCredential</name>
+    </types>
+    <types>
+        <members>*</members>
+        <name>PermissionSet</name>
+    </types>
+    <types>
+        <members>*</members>
+        <name>StaticResource</name>
+    </types>
+    <version>63.0</version>
+</Package>

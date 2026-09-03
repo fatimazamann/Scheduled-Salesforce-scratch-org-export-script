@@ -118,6 +118,13 @@ const SPEC = {
 	sfExecutable: { long: 'sf-executable', default: '', description: 'Full path to the sf CLI (else resolved from PATH)' },
 	sfCliEntry: { long: 'sf-cli-entry', default: '', description: "Path to the sf CLI's JS entry point; bypasses the cmd.exe shim" },
 	cleanScript: { long: 'clean-script', default: '', description: 'Path to clean-json.js (default: alongside this script)' },
+	metadataManifest: { long: 'metadata-manifest', default: '', description: 'package.xml to retrieve metadata with; omit to skip metadata entirely' },
+	metadataSubdir: { long: 'metadata-subdir', default: 'metadata', description: 'Folder under --dir the metadata is written into' },
+	metadataProject: { long: 'metadata-project', default: '', description: 'SFDX project folder the retrieve runs in (created if missing)' },
+	metadataNamespace: { long: 'metadata-namespace', default: '', description: "Namespace the manifest's unprefixed names resolve against" },
+	metadataApiVersion: { long: 'metadata-api-version', default: '', description: "API version for the retrieve; default: the manifest's own <version>" },
+	metadataTimeout: { long: 'metadata-timeout', default: '900', description: 'Timeout in seconds for the metadata retrieve' },
+	metadataRequired: { long: 'metadata-required', boolean: true, description: 'Fail the whole export if the metadata retrieve fails' },
 	timeout: { long: 'timeout', default: '900', description: 'Timeout in seconds for each sf command' },
 	quiet: { long: 'quiet', boolean: true, description: 'Suppress informational output' },
 	help: { long: 'help', short: 'h', boolean: true, description: 'Show this help' },
@@ -233,6 +240,32 @@ const timeoutSeconds = Number(options.timeout);
 if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
 	die(EXIT.INVALID_ARGUMENTS, '--timeout must be a positive number of seconds.');
 }
+
+// --- Metadata retrieve options ----------------------------------------------
+// Metadata is opt-in: no --metadata-manifest means this script behaves exactly
+// as it did before the feature existed.
+const metadataManifest = String(options.metadataManifest || '').trim();
+const metadataEnabled = metadataManifest !== '';
+if (metadataEnabled && !fs.existsSync(metadataManifest)) {
+	die(EXIT.INVALID_ARGUMENTS, `--metadata-manifest does not exist: ${metadataManifest}`);
+}
+const metadataSubdir = String(options.metadataSubdir || 'metadata').trim();
+if (metadataEnabled && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(metadataSubdir)) {
+	die(EXIT.INVALID_ARGUMENTS, `--metadata-subdir must be a single plain folder name, got ${JSON.stringify(metadataSubdir)}.`);
+}
+const metadataNamespace = String(options.metadataNamespace || '').trim();
+if (metadataNamespace && !/^[A-Za-z][A-Za-z0-9_]{0,14}$/.test(metadataNamespace)) {
+	die(EXIT.INVALID_ARGUMENTS, `--metadata-namespace is not a valid namespace prefix: ${JSON.stringify(metadataNamespace)}`);
+}
+const metadataApiVersionFlag = String(options.metadataApiVersion || '').trim();
+if (metadataApiVersionFlag && !/^\d{2,3}\.0$/.test(metadataApiVersionFlag)) {
+	die(EXIT.INVALID_ARGUMENTS, `--metadata-api-version must look like "63.0", got ${JSON.stringify(metadataApiVersionFlag)}.`);
+}
+const metadataTimeoutSeconds = Number(options.metadataTimeout);
+if (!Number.isFinite(metadataTimeoutSeconds) || metadataTimeoutSeconds <= 0) {
+	die(EXIT.INVALID_ARGUMENTS, '--metadata-timeout must be a positive number of seconds.');
+}
+const metadataRequired = options.metadataRequired === true;
 
 // Non-interactive is the DEFAULT. --interactive is an explicit opt-in and is
 // additionally refused for scratch orgs, where re-authenticating via a browser
@@ -452,6 +485,189 @@ function detectTruncation(dir) {
 }
 
 // ---------------------------------------------------------------------------
+// Metadata retrieve
+// ---------------------------------------------------------------------------
+
+const METADATA_STATUS = {
+	SKIPPED: 'SKIPPED',
+	OK: 'OK',
+	OK_WITH_WARNINGS: 'OK_WITH_WARNINGS',
+	FAILED: 'FAILED',
+};
+
+/** Pull <version>63.0</version> out of a manifest, without an XML parser. */
+function manifestApiVersion(manifestPath) {
+	try {
+		const text = fs.readFileSync(manifestPath, 'utf8');
+		const m = text.match(/<version>\s*([\d.]+)\s*<\/version>/i);
+		if (!m) return null;
+		return /^\d+$/.test(m[1]) ? `${m[1]}.0` : m[1];
+	} catch (_) {
+		return null;
+	}
+}
+
+/**
+ * `sf project retrieve start` refuses to run anywhere that is not an SFDX
+ * project ("InvalidProjectWorkspaceError"), so we give it one: a folder whose
+ * only purpose is to hold an sfdx-project.json. Nothing is ever written into
+ * it -- the retrieved files go to --output-dir.
+ *
+ * We create it if it is missing rather than requiring a committed scaffold, so
+ * a fresh checkout on a new machine works with no manual setup step.
+ */
+function ensureSfdxProject(projectDir, apiVersion) {
+	fs.mkdirSync(path.join(projectDir, 'force-app'), { recursive: true });
+	const projectFile = path.join(projectDir, 'sfdx-project.json');
+	if (fs.existsSync(projectFile)) return projectFile;
+	const project = {
+		packageDirectories: [{ path: 'force-app', default: true }],
+		namespace: metadataNamespace || '',
+		sfdcLoginUrl: 'https://login.salesforce.com',
+		sourceApiVersion: apiVersion || '63.0',
+	};
+	fs.writeFileSync(projectFile, `${JSON.stringify(project, null, 2)}\n`);
+	return projectFile;
+}
+
+/** Count every file written under a directory tree. */
+function countFiles(dir) {
+	let n = 0;
+	let entries;
+	try {
+		entries = fs.readdirSync(dir, { withFileTypes: true });
+	} catch (_) {
+		return 0;
+	}
+	for (const entry of entries) {
+		if (entry.isDirectory()) n += countFiles(path.join(dir, entry.name));
+		else n += 1;
+	}
+	return n;
+}
+
+/**
+ * Retrieve metadata into <dir>/<subdir>.
+ *
+ * Returns a status object that always exists, even on failure, so the caller
+ * can record what happened rather than inferring it from log text. Whether a
+ * failure here sinks the whole export is the caller's decision
+ * (--metadata-required), not this function's.
+ */
+async function retrieveMetadata(outputDir) {
+	const startedAt = new Date();
+	const apiVersion = metadataApiVersionFlag || manifestApiVersion(metadataManifest) || '';
+
+	let projectDir = options.metadataProject
+		? path.resolve(process.cwd(), options.metadataProject)
+		: path.resolve(__dirname, 'metadata-project');
+	try {
+		ensureSfdxProject(projectDir, apiVersion);
+	} catch (e) {
+		return {
+			status: METADATA_STATUS.FAILED,
+			error: `Could not prepare the SFDX project folder ${projectDir}: ${e.message}`,
+			startedAt: startedAt.toISOString(),
+			finishedAt: new Date().toISOString(),
+		};
+	}
+
+	try {
+		fs.mkdirSync(outputDir, { recursive: true });
+	} catch (e) {
+		return {
+			status: METADATA_STATUS.FAILED,
+			error: `Could not create metadata output directory ${outputDir}: ${e.message}`,
+			startedAt: startedAt.toISOString(),
+			finishedAt: new Date().toISOString(),
+		};
+	}
+
+	const args = [
+		'project',
+		'retrieve',
+		'start',
+		'--manifest',
+		metadataManifest,
+		'--target-org',
+		userName,
+		'--output-dir',
+		outputDir,
+		// --wait bounds the CLI's own polling; our timeout is the outer bound.
+		'--wait',
+		String(Math.max(1, Math.ceil(metadataTimeoutSeconds / 60))),
+	];
+	if (apiVersion) args.push('--api-version', apiVersion);
+
+	out(`Retrieving metadata using ${metadataManifest}${apiVersion ? ` (API ${apiVersion})` : ''}...`);
+
+	// --json, always. The human-readable form is a table with one row per
+	// component -- hundreds of lines that would bury everything else in the
+	// scheduled run's log while telling us nothing we cannot get from the JSON.
+	const res = await runner.sfJson(args, {
+		cwd: projectDir,
+		timeoutMs: metadataTimeoutSeconds * 1000,
+		onStderrLine: (line) => line.trim() && warn(line),
+	});
+	const finishedAt = new Date();
+	const base = {
+		manifest: metadataManifest,
+		apiVersion: apiVersion || null,
+		outputDirectory: outputDir,
+		startedAt: startedAt.toISOString(),
+		finishedAt: finishedAt.toISOString(),
+		durationMs: finishedAt.getTime() - startedAt.getTime(),
+	};
+
+	if (!res.ok) {
+		const detail = detailOf(res.raw);
+		return {
+			...base,
+			status: METADATA_STATUS.FAILED,
+			transient: classifyFailure(res.raw, detail) === EXIT.TRANSIENT,
+			auth: classifyFailure(res.raw, detail) === EXIT.AUTH,
+			error: `"sf project retrieve start" failed (exit ${res.raw.code}). ${detail}`.trim(),
+			fileCount: countFiles(outputDir),
+		};
+	}
+
+	const result = res.result || {};
+	// The shape has moved around across CLI versions: newer builds return
+	// `files`, older ones `fileProperties`. Fall back to counting what actually
+	// landed on disk, which is the number that matters for a backup anyway.
+	const components = Array.isArray(result.files)
+		? result.files
+		: Array.isArray(result.fileProperties)
+			? result.fileProperties
+			: [];
+	const fileCount = countFiles(outputDir);
+
+	// Warnings are how the CLI reports a manifest entry that does not exist in
+	// the org ("Entity of type 'Layout' named '...' cannot be found"). The
+	// retrieve still succeeds, so these are easy to miss -- and each one is a
+	// component you believe you are backing up and are not.
+	const messages = []
+		.concat(Array.isArray(result.messages) ? result.messages : result.messages ? [result.messages] : [])
+		.map((m) => (typeof m === 'string' ? m : m && (m.problem || m.message)))
+		.filter(Boolean);
+
+	const byType = {};
+	for (const c of components) {
+		const t = (c && c.type) || 'unknown';
+		byType[t] = (byType[t] || 0) + 1;
+	}
+
+	return {
+		...base,
+		status: messages.length ? METADATA_STATUS.OK_WITH_WARNINGS : METADATA_STATUS.OK,
+		componentCount: components.length,
+		fileCount,
+		componentsByType: byType,
+		warnings: messages,
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -574,7 +790,55 @@ async function main() {
 		);
 	}
 
-	// --- 6. Per-org manifest ---------------------------------------------
+	// --- 6. Metadata ------------------------------------------------------
+	// Deliberately AFTER the data export and clean. Data is the part that
+	// cannot be reconstructed from a repo; metadata usually can. If we only
+	// have time or connectivity for one of the two, the data wins.
+	let metadata = { status: METADATA_STATUS.SKIPPED, reason: 'No --metadata-manifest was supplied.' };
+	if (metadataEnabled) {
+		const metadataDir = path.join(directoryPath, metadataSubdir);
+		try {
+			metadata = await retrieveMetadata(metadataDir);
+		} catch (e) {
+			metadata = { status: METADATA_STATUS.FAILED, error: `Unexpected metadata failure: ${e.message}` };
+		}
+
+		if (metadata.status === METADATA_STATUS.FAILED) {
+			if (metadataRequired) {
+				die(
+					metadata.auth ? EXIT.AUTH : metadata.transient ? EXIT.TRANSIENT : EXIT.EXPORT_FAILED,
+					`Metadata retrieve failed for ${userName} and --metadata-required was set.`,
+					metadata.error
+				);
+			}
+			// Non-fatal is the default, and it is the right default: a metadata
+			// problem must not discard a data export that already succeeded.
+			warn(
+				`Metadata retrieve FAILED for ${userName}; the data export is unaffected and is being kept. ` +
+					`${metadata.error || ''}`
+			);
+		} else {
+			for (const w of metadata.warnings || []) {
+				warn(
+					`Metadata manifest entry could not be retrieved: ${w} ` +
+						`-- it is listed in ${path.basename(metadataManifest)} but does not exist in this org, ` +
+						`so it is NOT in this backup.`
+				);
+			}
+			out(
+				`Metadata: ${metadata.componentCount} component(s), ${metadata.fileCount} file(s) ` +
+					`in ${Math.round((metadata.durationMs || 0) / 1000)}s` +
+					`${metadata.warnings && metadata.warnings.length ? ` (${metadata.warnings.length} warning(s))` : ''}.`
+			);
+			try {
+				fs.writeFileSync(path.join(metadataDir, '_metadata-summary.json'), JSON.stringify(metadata, null, 2));
+			} catch (e) {
+				warn(`Could not write _metadata-summary.json: ${e.message}`);
+			}
+		}
+	}
+
+	// --- 7. Per-org manifest ---------------------------------------------
 	const finishedAt = new Date();
 	const manifest = {
 		schemaVersion: 1,
@@ -586,6 +850,7 @@ async function main() {
 		queries: queries.map((q) => ({ name: q.name, soql: q.soql })),
 		outputDirectory: directoryPath,
 		truncationWarnings: truncation,
+		metadata,
 		startedAt: startedAt.toISOString(),
 		finishedAt: finishedAt.toISOString(),
 		durationMs: finishedAt.getTime() - startedAt.getTime(),
@@ -598,6 +863,9 @@ async function main() {
 	}
 
 	out(`Process completed in ${Math.round(manifest.durationMs / 1000)}s.`);
+	if (metadata.status === METADATA_STATUS.FAILED) {
+		out('Completed WITH a metadata failure -- the data export above is complete and valid.');
+	}
 	if (truncation.length) {
 		out(`Completed WITH ${truncation.length} truncation warning(s) -- review them.`);
 	}
@@ -609,4 +877,4 @@ main().catch((e) => {
 	process.exit(EXIT.UNCAUGHT);
 });
 
-module.exports = { EXIT };
+module.exports = { EXIT, METADATA_STATUS };

@@ -23,4 +23,14 @@ config/export-config.local.json
 # Node
 node_modules/
 npm-debug.log*
+
+# Scaffold folder the metadata retrieve runs inside. Generated on first use;
+# it holds nothing but an sfdx-project.json and an empty force-app.
+metadata-project/
+
+# A retrieve done by hand to check a manifest
+_manifest-test/
+
+# macOS
 .DS_Store
+_to_delete/

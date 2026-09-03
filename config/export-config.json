@@ -21,6 +21,18 @@
   "connectorFilter": [],
   "queryLimit": 200,
 
+  "_comment_metadata": "Metadata retrieve, driven by a manifest. Runs AFTER the data export, into <org folder>/metadata. Set enabled=true only once config/package.xml exists -- preflight refuses to start the run otherwise, rather than failing the same way once per org. failureIsFatal=false means a metadata problem is reported but never discards a data export that already succeeded; set it true if a run without metadata should count as a failed run. namespace is what the manifest's unprefixed API names resolve against. apiVersion blank = take it from the manifest's own <version>. timeoutSeconds is ADDED to childTimeoutSeconds, not shared with it.",
+  "metadata": {
+    "enabled": false,
+    "manifest": "config/package.xml",
+    "projectDir": "metadata-project",
+    "outputSubdir": "metadata",
+    "namespace": "cja_cj",
+    "apiVersion": "",
+    "failureIsFatal": false,
+    "timeoutSeconds": 900
+  },
+
   "_comment_appcheck": "Before running a full export we describe one packaged object. Metadata only, so an org with the package installed but zero records is still exported. Set enabled=false to export every reachable scratch org.",
   "appCheck": {
     "enabled": true,

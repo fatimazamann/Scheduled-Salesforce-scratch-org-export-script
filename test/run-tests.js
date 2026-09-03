@@ -480,6 +480,177 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 	check('truncation recorded in the manifest', manifest.truncationWarnings.length >= 1);
 }
 
+// --- Metadata retrieve -----------------------------------------------------------
+// The governing rule for this whole block: metadata is a SEPARATE deliverable
+// from data. It must never be able to discard a data export that succeeded,
+// and its own failures must never be silent.
+{
+	const mdFixtures = fs.mkdtempSync(path.join(os.tmpdir(), 'sfexp-md-'));
+	const manifest = path.join(mdFixtures, 'package.xml');
+	fs.writeFileSync(
+		manifest,
+		'<?xml version="1.0" encoding="UTF-8"?>\n' +
+			'<Package xmlns="http://soap.sforce.com/2006/04/metadata">' +
+			'<types><members>*</members><name>ApexClass</name></types>' +
+			'<version>63.0</version></Package>\n'
+	);
+	const mdConfig = (over = {}) => ({
+		metadata: Object.assign(
+			{
+				enabled: true,
+				manifest,
+				projectDir: path.join(mdFixtures, 'project'),
+				outputSubdir: 'metadata',
+				namespace: 'cja_cj',
+				failureIsFatal: false,
+				timeoutSeconds: 60,
+			},
+			over
+		),
+	});
+
+	// MD1 -- the happy path.
+	{
+		const r = runScenario('MD1 metadata enabled -> retrieved alongside the data', {
+			orgs: [scratchOrg()],
+			orgFixtures: { 'test@example.com': { describe: 'ok', export: 'ok', metadata: 'ok' } },
+			config: mdConfig(),
+		});
+		check('exit code 0', r.code === 0, `got ${r.code}\n${r.stderr.slice(-600)}`);
+		const dir = r.summary && r.summary.orgs[0].exportDir;
+		check('data still exported', dir && fs.existsSync(path.join(dir, 'cja_cj__CJ_Connector__cs.json')));
+		check('metadata folder created', dir && fs.existsSync(path.join(dir, 'metadata')));
+		check('retrieved files present', dir && fs.existsSync(path.join(dir, 'metadata', 'classes', 'CJThing.cls')));
+		check('metadata summary written', dir && fs.existsSync(path.join(dir, 'metadata', '_metadata-summary.json')));
+		// The mock refuses to run without an sfdx-project.json in its cwd, so
+		// reaching this point at all proves the scaffold was created.
+		check('SFDX project scaffold created', fs.existsSync(path.join(mdFixtures, 'project', 'sfdx-project.json')));
+		const scaffold = JSON.parse(fs.readFileSync(path.join(mdFixtures, 'project', 'sfdx-project.json'), 'utf8'));
+		check('scaffold carries the namespace', scaffold.namespace === 'cja_cj', scaffold.namespace);
+		check('scaffold takes the API version from the manifest', scaffold.sourceApiVersion === '63.0', scaffold.sourceApiVersion);
+		check('retrieve ran with --json, not the wall of table output', /"--json"/.test(r.calls));
+		const md = r.summary.orgs[0].metadata;
+		check('metadata status OK in the run summary', md && md.status === 'OK', md && md.status);
+		check('component count recorded', md && md.componentCount === 2, md && String(md.componentCount));
+		// Counted before _metadata-summary.json is written, so the number is
+		// what was retrieved rather than what is in the folder afterwards.
+		check('file count recorded', md && md.fileCount === 3, md && String(md.fileCount));
+	}
+
+	// MD2 -- a manifest entry that does not exist in the org. The retrieve
+	// SUCCEEDS, so this is the case most likely to go unnoticed.
+	{
+		const r = runScenario('MD2 manifest names a component the org lacks -> warned, not hidden', {
+			orgs: [scratchOrg({ username: 'w@example.com', alias: 'warn-org', orgId: '00D000000000091AAA' })],
+			orgFixtures: { 'w@example.com': { describe: 'ok', export: 'ok', metadata: 'warn' } },
+			config: mdConfig(),
+		});
+		check('export still succeeds', r.code === 0, `got ${r.code}`);
+		const md = r.summary.orgs[0].metadata;
+		check('status distinguishes warnings from a clean run', md && md.status === 'OK_WITH_WARNINGS', md && md.status);
+		check('the missing component is named in the log', /Missing Layout/.test(r.logText), r.logText.slice(-400));
+		check('the log says it is absent from the backup', /NOT in this backup/.test(r.logText));
+	}
+
+	// MD3 -- the important one. A metadata failure must leave the data export
+	// in place, not throw it away.
+	{
+		const r = runScenario('MD3 metadata fails, failureIsFatal=false -> data export is kept', {
+			orgs: [scratchOrg({ username: 'mf@example.com', alias: 'md-fail', orgId: '00D000000000092AAA' })],
+			orgFixtures: { 'mf@example.com': { describe: 'ok', export: 'ok', metadata: 'fail' } },
+			config: mdConfig(),
+		});
+		check('run still exits 0', r.code === 0, `got ${r.code}`);
+		check('org counted as a success', r.summary && r.summary.success === 1);
+		const dir = r.summary.orgs[0].exportDir;
+		check('data export survived and was swapped into place', dir && fs.existsSync(path.join(dir, 'cja_cj__CJ_Connector__cs.json')));
+		const md = r.summary.orgs[0].metadata;
+		check('metadata failure recorded, not swallowed', md && md.status === 'FAILED', md && md.status);
+		check('failure reason recorded', md && /INVALID_TYPE/.test(md.error || ''), md && md.error);
+		check('failure is visible in the log', /metadata retrieve did not/i.test(r.logText), r.logText.slice(-400));
+	}
+
+	// MD4 -- opting in to the stricter policy.
+	{
+		const r = runScenario('MD4 metadata fails, failureIsFatal=true -> whole org export fails', {
+			orgs: [scratchOrg({ username: 'mr@example.com', alias: 'md-req', orgId: '00D000000000093AAA' })],
+			orgFixtures: { 'mr@example.com': { describe: 'ok', export: 'ok', metadata: 'fail' } },
+			config: mdConfig({ failureIsFatal: true }),
+		});
+		check('exit code 1', r.code === 1, `got ${r.code}`);
+		check('org counted as a failure', r.summary && r.summary.failed === 1);
+		check('status FAILED', r.summary && r.summary.orgs[0].status === 'FAILED');
+		const dir = r.summary.orgs[0].exportDir;
+		check('the partial export was discarded, not left half-written', !fs.existsSync(dir), dir);
+	}
+
+	// MD5 -- setup error. Fail once, before any org is touched, rather than
+	// producing the identical failure once per org.
+	{
+		const r = runScenario('MD5 metadata enabled but manifest missing -> preflight failure', {
+			orgs: [scratchOrg()],
+			orgFixtures: { 'test@example.com': { describe: 'ok', export: 'ok', metadata: 'ok' } },
+			config: mdConfig({ manifest: path.join(mdFixtures, 'nope.xml') }),
+		});
+		check('exit code 2 (preflight)', r.code === 2, `got ${r.code}`);
+		check('names the missing manifest', /manifest was not found/.test(r.stdout + r.stderr + r.logText));
+		check('no org was touched', !/data export tree/.test(r.calls.replace(/"/g, '')) && !/retrieve/.test(r.calls));
+	}
+
+	// MD6 -- a manifest that is not a manifest. Caught before the run, because
+	// a retrieve driven by it succeeds and returns nothing.
+	{
+		const bogus = path.join(mdFixtures, 'notes.xml');
+		fs.writeFileSync(bogus, '<?xml version="1.0"?><notes>hello</notes>');
+		const r = runScenario('MD6 manifest is not a package.xml -> preflight failure', {
+			orgs: [scratchOrg()],
+			orgFixtures: { 'test@example.com': { describe: 'ok', export: 'ok' } },
+			config: mdConfig({ manifest: bogus }),
+		});
+		check('exit code 2 (preflight)', r.code === 2, `got ${r.code}`);
+		check('explains why', /does not look like a metadata manifest/.test(r.stdout + r.stderr + r.logText));
+	}
+
+	// MD7 -- regression: with metadata off, nothing about the old behaviour
+	// changes and no retrieve is ever issued.
+	{
+		const r = runScenario('MD7 metadata disabled -> no retrieve is issued at all', {
+			orgs: [scratchOrg()],
+			orgFixtures: { 'test@example.com': { describe: 'ok', export: 'ok' } },
+		});
+		check('exit code 0', r.code === 0, `got ${r.code}`);
+		check('no project retrieve call', !/retrieve/.test(r.calls), r.calls.slice(0, 300));
+		check('no metadata folder', !fs.existsSync(path.join(r.summary.orgs[0].exportDir, 'metadata')));
+		check('no metadata block in the summary', !r.summary.orgs[0].metadata);
+	}
+
+	// MD8 -- config validation, unit level.
+	{
+		process.stdout.write('\n  MD8 metadata configuration validation\n');
+		const { loadConfig, ConfigError } = require('../lib/config');
+		const rejects = (over, pattern) => {
+			try {
+				loadConfig({ overrides: { metadata: Object.assign({ enabled: true, manifest }, over) }, env: {} });
+				return false;
+			} catch (e) {
+				return e instanceof ConfigError && pattern.test(e.message);
+			}
+		};
+		check('rejects a subdir containing a path separator', rejects({ outputSubdir: 'a/b' }, /single plain folder name/));
+		check('rejects a subdir that escapes the export folder', rejects({ outputSubdir: '..' }, /single plain folder name/));
+		check('rejects a bad namespace', rejects({ namespace: 'not a namespace' }, /namespace/));
+		check('rejects a bad API version', rejects({ apiVersion: '63' }, /apiVersion/));
+		check('rejects an empty manifest path', rejects({ manifest: '' }, /metadata.manifest/));
+		const ok = loadConfig({ overrides: { metadata: { enabled: true, manifest } }, env: {} });
+		check('resolves the manifest to an absolute path', path.isAbsolute(ok.metadata.manifest));
+		check('metadata is off by default', loadConfig({ env: {} }).metadata.enabled === false);
+		check(
+			'SFEXPORT_METADATA can switch it on without editing the config',
+			loadConfig({ env: { SFEXPORT_METADATA: 'true', SFEXPORT_METADATA_MANIFEST: manifest } }).metadata.enabled === true
+		);
+	}
+}
+
 // --- Secret redaction ----------------------------------------------------------
 {
 	process.stdout.write('\n  SEC redaction of tokens and auth URLs\n');

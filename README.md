@@ -9,7 +9,8 @@ Windows Task Scheduler
   └─ scheduled-export.bat        thin entrypoint: cwd, PATH, node check
        └─ orchestrator.js        discovery, eligibility, locking, logging, retry
             └─ export-script.js  one org per invocation: SOQL + sf data export tree
-                 └─ clean-json.js
+                 ├─ clean-json.js
+                 └─ sf project retrieve start   (optional, manifest-driven)
 ```
 
 ## Install
@@ -67,6 +68,9 @@ connectjunction-exports\
         cja_cj__Dataflow__cs.json     any-to-any only
         export-demo-plan.json
         _export-summary.json          when this org was last exported
+        metadata\                     only when metadata.enabled
+            classes\ objects\ layouts\ ...
+            _metadata-summary.json
     cj-export_integration-test\
     cj-export_dev-org-4\
 
@@ -92,6 +96,59 @@ instead, pruned by `exportRetentionDays`.
 `connectjunction-exports/` and `logs/` are gitignored and must stay that way:
 the exports contain customer configuration, including message template bodies.
 
+## Metadata
+
+Off by default. Two steps to turn it on:
+
+```cmd
+copy "C:\path\to\your\package.xml" "C:\tools\salesforce-export\config\package.xml"
+```
+
+then set `"enabled": true` in the `metadata` block of
+`config/export-config.json`. Check it first without touching the schedule:
+
+```cmd
+scheduled-export.bat --org my-feature-org --metadata
+```
+
+Metadata runs **after** the data export, per org, into `metadata\` inside that
+org's folder. The two are deliberately separate:
+
+* Data is the part that cannot be reconstructed from a repo. Metadata usually
+  can. If only one of the two can finish, data wins.
+* A failed retrieve is **reported, not fatal** — the data export that already
+  succeeded is still swapped into place, the org still counts as a success, and
+  the run summary carries a `metadata: FAILED` line. Set
+  `"failureIsFatal": true` if a run without metadata should count as a failed
+  run instead.
+* `metadata.timeoutSeconds` is **added** to `childTimeoutSeconds`, never shared
+  with it, so a slow retrieve can never get the child killed after the data
+  export has already succeeded.
+
+`sf project retrieve start` refuses to run outside an SFDX project, so the
+first run creates `metadata-project/` — a folder containing nothing but an
+`sfdx-project.json`. It is gitignored and nothing is ever written into it; the
+retrieved files go to `--output-dir`.
+
+Two things worth knowing about manifests:
+
+* **A manifest that names every component explicitly goes stale.** Anything
+  created in an org after the manifest was written is silently absent from the
+  backup, and nothing says so, because the retrieve succeeded exactly as
+  instructed. `config/package.xml.example` shows the wildcard alternative.
+* **Fields are not a gap.** Fields, list views, record types and web links are
+  children of `CustomObject` and come back whenever their object is retrieved,
+  listed individually or not.
+
+When the org lacks something the manifest names, the retrieve still *succeeds*
+and reports it as a warning. Those warnings are pulled out of the JSON and
+logged individually — `Entity of type 'Layout' named '...' cannot be found`
+means that component is not in the backup.
+
+The retrieve always runs with `--json`. The human-readable form is a table with
+one row per component; several hundred rows per org would bury everything else
+in the nightly log.
+
 ## Configuration
 
 `config/export-config.json` is the source of truth. Any value can be overridden
@@ -106,6 +163,11 @@ task without editing a tracked file:
 | `SFEXPORT_SF_EXECUTABLE` / `SFEXPORT_SF_CLI_ENTRY` | how `sf` is invoked |
 | `SFEXPORT_INTEGRATION_TYPE` | `any-to-any` \| `salesforce-to-any` \| empty |
 | `SFEXPORT_CONNECTORS` | comma-separated connector filter |
+| `SFEXPORT_METADATA` | `true` / `false` — metadata retrieve on or off |
+| `SFEXPORT_METADATA_MANIFEST` | path to the package.xml |
+| `SFEXPORT_METADATA_NAMESPACE` | namespace the manifest's names resolve against |
+| `SFEXPORT_METADATA_FATAL` | `true` makes a failed retrieve fail the org |
+| `SFEXPORT_METADATA_TIMEOUT_SECONDS` | retrieve budget, added to the child's |
 | `SFEXPORT_APP_CHECK` | `true` / `false` |
 | `SFEXPORT_APP_CHECK_OBJECT` | probe object, default `cja_cj__CJ_Connector__c` |
 | `SFEXPORT_MAX_RETRIES`, `SFEXPORT_CHILD_TIMEOUT_SECONDS` | execution |
@@ -131,7 +193,8 @@ opts back in to `sf org login web` for Sandbox and Production only.
 node test\run-tests.js
 ```
 
-148 assertions covering the full test matrix against a mock Salesforce CLI: org
+208 assertions covering the full test matrix against a mock Salesforce CLI: org
 discovery and filtering, expiry, package detection, failure isolation, retry
 policy, locking, dry run, paths with spaces, SOQL escaping, Windows command-line
-escaping, and secret redaction. No org and no network required.
+escaping, metadata retrieve (including that a metadata failure never discards a
+good data export), and secret redaction. No org and no network required.

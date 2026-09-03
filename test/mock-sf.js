@@ -85,6 +85,52 @@ if (cmd.startsWith('org login')) {
 	emit({ status: 0, result: {} });
 }
 
+if (cmd.startsWith('project retrieve')) {
+	const o = org(flag('--target-org'));
+	// The CLI refuses to run outside an SFDX project. Assert that the child
+	// actually gave us one, rather than trusting that it did.
+	if (!fs.existsSync(path.join(process.cwd(), 'sfdx-project.json'))) {
+		emit({
+			status: 1,
+			name: 'InvalidProjectWorkspaceError',
+			message: 'This directory does not contain a valid Salesforce DX project.',
+		}, 1);
+	}
+	if (o.metadata === 'fail') {
+		emit({ status: 1, name: 'SfError', message: 'INVALID_TYPE: Cannot retrieve metadata type Nonsense' }, 1);
+	}
+	if (o.metadata === 'transient') {
+		emit({ status: 1, name: 'NetworkError', message: 'socket hang up (ECONNRESET)' }, 1);
+	}
+	const dir = flag('--output-dir');
+	const files = [];
+	const write = (rel, body) => {
+		const full = path.join(dir, rel);
+		fs.mkdirSync(path.dirname(full), { recursive: true });
+		fs.writeFileSync(full, body);
+		files.push(rel);
+	};
+	write(path.join('classes', 'CJThing.cls'), 'public class CJThing {}');
+	write(path.join('classes', 'CJThing.cls-meta.xml'), '<ApexClass/>');
+	write(path.join('objects', 'Widget__c', 'Widget__c.object-meta.xml'), '<CustomObject/>');
+
+	const result = {
+		done: true,
+		success: true,
+		status: 'Succeeded',
+		files: [
+			{ fullName: 'CJThing', type: 'ApexClass', state: 'Created' },
+			{ fullName: 'Widget__c', type: 'CustomObject', state: 'Created' },
+		],
+	};
+	// A manifest entry that does not exist in the org: the retrieve SUCCEEDS
+	// and reports it as a warning, which is exactly why it is easy to miss.
+	if (o.metadata === 'warn') {
+		result.messages = [{ problem: "Entity of type 'Layout' named 'Gone__c-Missing Layout' cannot be found" }];
+	}
+	emit({ status: 0, result });
+}
+
 if (cmd.startsWith('data export tree')) {
 	const username = flag('--target-org');
 	const o = org(username);
