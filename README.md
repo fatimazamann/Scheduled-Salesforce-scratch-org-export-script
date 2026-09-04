@@ -15,12 +15,19 @@ Windows Task Scheduler
 
 ## Install
 
-1. Copy this folder onto the machine that will run the schedule.
-2. **Copy your existing `clean-json.js` into the project root.** It is not
-   shipped here; the exporter calls it with its existing contract
-   `node clean-json.js <directory> <comma,separated,fields>`.
-3. Review `config/export-config.json`.
-4. There are no runtime dependencies — no `npm install` step.
+**Setting this up on a new machine? Read [docs/SETUP.md](docs/SETUP.md)** — it
+covers prerequisites, authentication, the first run, Task Scheduler
+registration and troubleshooting, from scratch.
+
+The short version:
+
+1. Clone this repo onto the machine that will run the schedule.
+2. Install Node 18+ and the Salesforce CLI v2.
+3. Authenticate the scratch orgs **as the Windows account the scheduled task
+   will run as** — the CLI auth store is per Windows profile, and this is the
+   single most common reason a run reports "0 orgs discovered".
+4. Review `config/export-config.json`.
+5. There are no runtime dependencies — no `npm install` step.
 
 ## Run it by hand first
 
