@@ -13,6 +13,31 @@ Windows Task Scheduler
                  └─ sf project retrieve start   (optional, manifest-driven)
 ```
 
+## What each file does
+
+| File | Role |
+|---|---|
+| `scheduled-export.bat` | Task Scheduler entry point. ~40 lines, deliberately thin: anchor the working directory, optionally source `set-env.cmd`, check `node` exists, hand off, propagate the exit code. No logic lives here — batch has no JSON parser and a quoting model that is a liability once org data is involved. |
+| `orchestrator.js` | The parent. Runs **once per run**: preflight, discover orgs, decide which are eligible, take the lock, loop over them sequentially, retry transient failures, write logs and the summary, prune old files, pick the exit code. Never talks to Salesforce about *data* — that is the child's job. |
+| `export-script.js` | The child. Runs **once per org**: verify auth, issue the four SOQL queries via `sf data export tree`, run `clean-json.js`, optionally retrieve metadata, write `_export-summary.json`. Reports outcomes as exit codes 0–6 so the parent can tell a transient failure from a permanent one. |
+| `clean-json.js` | Yours, unchanged. Strips audit fields (`CreatedById`, `SystemModstamp`, …) from the exported JSON. Called with its original contract: `node clean-json.js <dir> <comma,separated,fields>`. |
+| `lib/sf-cli.js` | Every process launch goes through here. Argument arrays, never shell strings. Handles the Windows `.cmd` shim problem: prefers the CLI's own `run.js` (no shell at all), then a real `.exe`, then `cmd.exe` with both escaping layers applied. |
+| `lib/config.js` | The configuration model: defaults → `config/export-config.json` → `SFEXPORT_*` env → CLI flags. Validates and resolves every path against the project root, so the working directory Task Scheduler hands you is irrelevant. |
+| `lib/logger.js` | Logging with an **allowlist** for org records, so a field like `accessToken` cannot leak even if Salesforce adds a new one, plus a denylist that scrubs auth URLs, tokens and PEM blocks from free text. |
+| `lib/lock.js` | Single-instance lock. Atomic create (`wx`), with stale-lock reclaim by PID liveness and age, so a crashed run doesn't block the schedule forever. |
+| `lib/soql.js` | SOQL string escaping and connector-list parsing. This is what makes a connector name containing `'` a value rather than a query fragment. |
+| `lib/args.js` | A ~90-line argument parser. Exists so the tool has **zero dependencies** — see below. |
+| `config/export-config.json` | The settings you actually edit. |
+| `config/package.xml` | The metadata manifest: what the metadata retrieve captures. |
+| `config/package.xml.example` | A wildcard alternative that cannot go stale, with notes on the trade-off. |
+| `test/run-tests.js` | 211 assertions against a mock CLI. No org, no network, no credentials. |
+| `test/mock-sf.js` | A fake `sf` driven by a JSON fixture — lets tests exercise dead orgs, expired orgs, auth failures and truncation without any of them being real. |
+| `docs/SETUP.md` | Bring-up on a new machine. |
+
+**Why the parent/child split.** One org failing must not stop the others. Because each org export is a separate OS process, a crash, a hang or an out-of-memory in one org is contained — the parent sees an exit code and moves on. Sharing one process would put every org at the mercy of the worst one.
+
+**Why zero dependencies.** The original used `commander`; `lib/args.js` replaces it. A scheduled job running unattended under a service account at 2am is the worst possible place to discover that a transitive dependency changed, or that `npm install` was never run on this machine.
+
 ## Install
 
 **Setting this up on a new machine? Read [docs/SETUP.md](docs/SETUP.md)** — it
