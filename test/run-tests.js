@@ -651,6 +651,49 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 		check('no metadata block in the summary', !r.summary.orgs[0].metadata);
 	}
 
+	// MD9 -- relative paths must survive the retrieve's working-directory
+	// change. The retrieve runs with cwd set to the SFDX project folder, so a
+	// relative --sf-cli-entry or --metadata-manifest that was fine for the data
+	// export resolves against the wrong directory by the time metadata runs --
+	// and fails only AFTER a successful data export, which is the worst place
+	// to find out. Everything is pinned absolute at startup instead.
+	{
+		process.stdout.write('\n  MD9 relative CLI and manifest paths survive the cwd change\n');
+		const base = fs.mkdtempSync(path.join(os.tmpdir(), 'sfexp-rel-'));
+		const fixture = path.join(base, 'fixture.json');
+		fs.writeFileSync(
+			fixture,
+			JSON.stringify({
+				orgList: { status: 0, result: { scratchOrgs: [] } },
+				orgs: { 'me@example.com': { describe: 'ok', export: 'ok', metadata: 'ok' } },
+			})
+		);
+		// Both paths given RELATIVE to ROOT, which is also the cwd we launch in.
+		const res = spawnSync(
+			process.execPath,
+			[
+				path.join(ROOT, 'export-script.js'),
+				'--user', 'me@example.com',
+				'--dir', path.join(base, 'out'),
+				'--type', 'Scratch',
+				'--integration', 'any-to-any',
+				'--sf-cli-entry', path.join('test', 'mock-sf.js'),
+				'--clean-script', path.join('test', 'mock-clean-json.js'),
+				'--metadata-manifest', path.join('config', 'package.xml'),
+				'--metadata-project', path.join(base, 'proj'),
+			],
+			{ cwd: ROOT, encoding: 'utf8', env: Object.assign({}, process.env, { MOCK_SF_FIXTURE: fixture }) }
+		);
+		check('child exits 0', res.status === 0, `got ${res.status}\n${(res.stderr || '').slice(-500)}`);
+		const summaryFile = path.join(base, 'out', '_export-summary.json');
+		check('summary written', fs.existsSync(summaryFile));
+		if (fs.existsSync(summaryFile)) {
+			const md = JSON.parse(fs.readFileSync(summaryFile, 'utf8')).metadata;
+			check('metadata ran despite the relative paths', md && md.status === 'OK', md && (md.status + ' ' + (md.error || '')));
+			check('the manifest path was pinned absolute', md && path.isAbsolute(md.manifest), md && md.manifest);
+		}
+	}
+
 	// MD8 -- config validation, unit level.
 	{
 		process.stdout.write('\n  MD8 metadata configuration validation\n');

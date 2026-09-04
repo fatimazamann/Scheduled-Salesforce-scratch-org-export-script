@@ -244,7 +244,10 @@ if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
 // --- Metadata retrieve options ----------------------------------------------
 // Metadata is opt-in: no --metadata-manifest means this script behaves exactly
 // as it did before the feature existed.
-const metadataManifest = String(options.metadataManifest || '').trim();
+// Absolute for the same reason as the CLI paths below: the retrieve runs with
+// a different working directory than the one we were launched in.
+const metadataManifestRaw = String(options.metadataManifest || '').trim();
+const metadataManifest = metadataManifestRaw ? path.resolve(process.cwd(), metadataManifestRaw) : '';
 const metadataEnabled = metadataManifest !== '';
 if (metadataEnabled && !fs.existsSync(metadataManifest)) {
 	die(EXIT.INVALID_ARGUMENTS, `--metadata-manifest does not exist: ${metadataManifest}`);
@@ -283,11 +286,18 @@ if (allowInteractive && resolvedOrgType === 'scratch') {
 // CLI runner
 // ---------------------------------------------------------------------------
 
-let sfExecutable = options.sfExecutable || null;
+// Resolved to absolute paths against the CALLER's cwd, immediately.
+//
+// The metadata retrieve runs with its working directory set to the SFDX
+// project folder, so anything still held as a relative path would resolve
+// against the wrong directory by the time it is used -- and it would do so
+// only for the metadata step, after the data export had already succeeded.
+// Pinning them here means cwd can move afterwards without consequence.
+let sfExecutable = options.sfExecutable ? path.resolve(process.cwd(), options.sfExecutable) : null;
 if (sfExecutable && !fs.existsSync(sfExecutable)) {
 	die(EXIT.INVALID_ARGUMENTS, `--sf-executable does not exist: ${sfExecutable}`);
 }
-const sfCliEntry = options.sfCliEntry || '';
+const sfCliEntry = options.sfCliEntry ? path.resolve(process.cwd(), options.sfCliEntry) : '';
 if (sfCliEntry && !fs.existsSync(sfCliEntry)) {
 	die(EXIT.INVALID_ARGUMENTS, `--sf-cli-entry does not exist: ${sfCliEntry}`);
 }
