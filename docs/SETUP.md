@@ -31,14 +31,41 @@ Two consequences that cause almost every "it found no orgs" report:
   service account reads a different profile, finds an empty auth store, and
   cheerfully reports "0 orgs discovered, exit 0". It is not broken; it is
   looking somewhere else.
-- **VS Code is not the source of truth.** The orgs listed in the VS Code
-  Salesforce panel come from this same CLI auth store, but the panel can show a
-  cached view. `sf org list --json` is what this tool reads and what you should
-  check against.
+- **The Windows account is what matters, not which tool you used.** Any route
+  into the CLI writes to the same store.
 
 If you are setting this up for a shared/service account, log in as that account
 and authenticate the orgs there. There is no way around it and no flag that
 fixes it.
+
+### Authenticating from VS Code is fine
+
+This is the normal workflow here, and it works. VS Code's **SFDX: Authorize an
+Org**, and the `sf` commands you type in its integrated terminal, both invoke
+the same CLI binary and write to the same `%USERPROFILE%\.sfdx` store. VS Code
+has no auth store of its own. So orgs you authorised in VS Code are visible to
+the scheduled task, as long as it runs as your Windows account.
+
+Two things that follow, neither of them a problem:
+
+- **The org "selected" in VS Code is irrelevant.** That is a per-project default
+  (`target-org`), and this tool always names the org explicitly with
+  `--target-org`. It exports every eligible org, not the one you happen to have
+  selected.
+- **`sf org list --json` is the source of truth, not the VS Code Org Browser.**
+  The panel reads the same store but can show a cached view. When the two
+  disagree, believe the CLI — that is what this tool reads.
+
+The one place it does matter: **`sf org login web` does not always set the
+`isScratch` flag** on the org record, and that is the command behind *Authorize
+an Org*. Orgs created directly with `sf org create scratch` get flagged; orgs
+you authorised into get flagged inconsistently. Discovery therefore does not
+rely on that flag alone — it also accepts the CLI's `scratchOrgs` bucket and a
+`*.scratch.my.salesforce.com` instance URL. Without that fallback, orgs
+authorised the VS Code way go missing from the run with no error at all.
+
+Still run the exporter itself from a plain Command Prompt rather than the VS
+Code terminal — see step 5. That is about *running*, not about authenticating.
 
 ---
 
