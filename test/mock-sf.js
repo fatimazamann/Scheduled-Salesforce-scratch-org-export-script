@@ -144,6 +144,16 @@ if (cmd.startsWith('project retrieve')) {
 	if (process.env.MOCK_SF_CALLLOG) {
 		fs.appendFileSync(process.env.MOCK_SF_CALLLOG, `RETRIEVE_CWD ${process.cwd()}\n`);
 	}
+	if (o.metadata === 'partial') {
+		// A retrieve that wrote some components and THEN failed. The work
+		// directory is left dirty -- which is the only way one org's metadata can
+		// reach another org's backup, since a successful retrieve is moved out.
+		const d = flag('--output-dir');
+		fs.mkdirSync(path.join(d, 'classes'), { recursive: true });
+		const t = String(flag('--target-org') || 'x').split('@')[0];
+		fs.writeFileSync(path.join(d, 'classes', `CJThing_${t}.cls`), 'partial');
+		emit({ status: 1, name: 'SfError', message: 'retrieve interrupted' }, 1);
+	}
 	if (o.metadata === 'fail') {
 		emit({ status: 1, name: 'SfError', message: 'INVALID_TYPE: Cannot retrieve metadata type Nonsense' }, 1);
 	}
@@ -158,7 +168,8 @@ if (cmd.startsWith('project retrieve')) {
 		fs.writeFileSync(full, body);
 		files.push(rel);
 	};
-	write(path.join('classes', 'CJThing.cls'), 'public class CJThing {}');
+	const tag = String(flag('--target-org') || 'unknown').split('@')[0];
+	write(path.join('classes', `CJThing_${tag}.cls`), `public class CJThing_${tag} {}`);
 	write(path.join('classes', 'CJThing.cls-meta.xml'), '<ApexClass/>');
 	write(path.join('objects', 'Widget__c', 'Widget__c.object-meta.xml'), '<CustomObject/>');
 

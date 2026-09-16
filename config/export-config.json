@@ -26,6 +26,7 @@
     "enabled": false,
     "manifest": "config/package.xml",
     "outputSubdir": "metadata",
+    "workDir": ".metadata-work",
     "namespace": "cja_cj",
     "apiVersion": "",
     "failureIsFatal": false,

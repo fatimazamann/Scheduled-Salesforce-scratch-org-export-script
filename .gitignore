@@ -31,6 +31,5 @@ metadata-project/
 # A retrieve done by hand to check a manifest
 _manifest-test/
 
-# macOS
-.DS_Store
-_to_delete/
+# Scratch SFDX project the metadata retrieve runs in. Regenerated as needed.
+.metadata-work/

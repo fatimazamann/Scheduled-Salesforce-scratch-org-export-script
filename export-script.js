@@ -120,7 +120,7 @@ const SPEC = {
 	cleanScript: { long: 'clean-script', default: '', description: 'Path to clean-json.js (default: alongside this script)' },
 	metadataManifest: { long: 'metadata-manifest', default: '', description: 'package.xml to retrieve metadata with; omit to skip metadata entirely' },
 	metadataSubdir: { long: 'metadata-subdir', default: 'metadata', description: 'Folder under --dir the metadata is written into' },
-	metadataProject: { long: 'metadata-project', default: '', description: 'Directory to use as the SFDX project root; must contain --dir (default: its parent)' },
+	metadataWorkDir: { long: 'metadata-work-dir', default: '', description: 'Scratch SFDX project the retrieve runs in, outside the export tree' },
 	metadataNamespace: { long: 'metadata-namespace', default: '', description: "Namespace the manifest's unprefixed names resolve against" },
 	metadataApiVersion: { long: 'metadata-api-version', default: '', description: "API version for the retrieve; default: the manifest's own <version>" },
 	metadataTimeout: { long: 'metadata-timeout', default: '900', description: 'Timeout in seconds for the metadata retrieve' },
@@ -269,6 +269,10 @@ if (!Number.isFinite(metadataTimeoutSeconds) || metadataTimeoutSeconds <= 0) {
 	die(EXIT.INVALID_ARGUMENTS, '--metadata-timeout must be a positive number of seconds.');
 }
 const metadataRequired = options.metadataRequired === true;
+// Outside the export tree by design -- see retrieveMetadata().
+const metadataWorkDir = options.metadataWorkDir
+	? path.resolve(process.cwd(), options.metadataWorkDir)
+	: path.resolve(__dirname, '.metadata-work');
 
 // Non-interactive is the DEFAULT. --interactive is an explicit opt-in and is
 // additionally refused for scratch orgs, where re-authenticating via a browser
@@ -532,7 +536,9 @@ function manifestApiVersion(manifestPath) {
  * --output-dir that overlaps a package directory
  * (RetrieveTargetDirOverlapsPackageError).
  */
-const SFDX_PLACEHOLDER_DIR = '_sfdx_placeholder';
+const SFDX_PLACEHOLDER_DIR = 'force-app';
+/** Where the CLI writes, inside the work directory. Never a package dir. */
+const RETRIEVE_SUBDIR = 'retrieved';
 
 function ensureSfdxProject(projectRoot, apiVersion) {
 	const projectFile = path.join(projectRoot, 'sfdx-project.json');
@@ -578,46 +584,41 @@ async function retrieveMetadata(outputDir) {
 	const startedAt = new Date();
 	const apiVersion = metadataApiVersionFlag || manifestApiVersion(metadataManifest) || '';
 
-	// Three constraints have to be satisfied at once, and they were learned the
-	// hard way -- each one produced a different production failure:
+	// WHY THE RETRIEVE DOES NOT HAPPEN IN THE EXPORT FOLDER
 	//
-	//   1. The retrieve must run inside an SFDX project, or the CLI refuses
-	//      outright (InvalidProjectWorkspaceError).
-	//   2. --output-dir must be INSIDE that project (OutputDirOutsideProjectError),
-	//      so the project root has to be an ancestor of the export folder.
-	//   3. --output-dir must NOT overlap a package directory
-	//      (RetrieveTargetDirOverlapsPackageError), so the package directory is
-	//      an empty placeholder somewhere else in the project.
+	// `sf project retrieve start` imposes at least four rules on where it is
+	// allowed to work, and three separate production failures came from trying
+	// to make one directory satisfy both the CLI's rules and the backup layout:
 	//
-	// And one that is not a CLI rule at all: the project root becomes the
-	// child process's working directory, and on Windows a directory that a
-	// process has used as its cwd cannot be renamed or deleted afterwards. The
-	// export folder is renamed at the end of every run, so it must NOT be the
-	// project root -- doing that made the atomic swap fail with EPERM and took
-	// the whole run down with it.
+	//   1. It must run inside an SFDX project     (InvalidProjectWorkspaceError)
+	//   2. --output-dir must be inside it         (OutputDirOutsideProjectError)
+	//   3. --output-dir must not overlap a
+	//      package directory                     (RetrieveTargetDirOverlapsPackageError)
+	//   4. Not a CLI rule but the worst one: the working directory of a child
+	//      process cannot be renamed or deleted afterwards on Windows. The
+	//      export folder IS renamed, at the end of every run.
 	//
-	// The export ROOT satisfies all four: it is an ancestor of the export
-	// folder, it is stable, and nothing ever renames it.
-	const projectRoot = options.metadataProject
-		? path.resolve(process.cwd(), options.metadataProject)
-		: path.dirname(directoryPath);
-	const relativeOut = path.relative(projectRoot, outputDir);
-	if (!relativeOut || relativeOut.startsWith('..') || path.isAbsolute(relativeOut)) {
-		return {
-			status: METADATA_STATUS.FAILED,
-			error:
-				`The metadata output directory ${outputDir} is not inside the SFDX project root ${projectRoot}, ` +
-				`which the Salesforce CLI requires. Pass --metadata-project with a directory that contains the export folder.`,
-			startedAt: startedAt.toISOString(),
-			finishedAt: new Date().toISOString(),
-		};
-	}
+	// So the two concerns are separated. The CLI gets a fixed, boring work
+	// directory that exists only for it -- never renamed, never inside the
+	// export tree, never shared with anything the user owns -- and the result
+	// is MOVED into the backup afterwards. The CLI's rules now apply only to a
+	// directory this script fully controls, so they stop being a function of
+	// exportRoot, the layout, the folder pattern, or what else happens to be
+	// on disk nearby.
+	const workRoot = metadataWorkDir;
+	const retrieveDir = path.join(workRoot, RETRIEVE_SUBDIR);
 	try {
-		ensureSfdxProject(projectRoot, apiVersion);
+		// Clear the previous org's retrieve first. Without this, components from
+		// org A would still be sitting there and would be moved into org B's
+		// backup -- a silent, plausible-looking corruption of the very thing
+		// this tool exists to produce.
+		fs.rmSync(retrieveDir, { recursive: true, force: true });
+		ensureSfdxProject(workRoot, apiVersion);
+		fs.mkdirSync(retrieveDir, { recursive: true });
 	} catch (e) {
 		return {
 			status: METADATA_STATUS.FAILED,
-			error: `Could not prepare the SFDX project in ${projectRoot}: ${e.message}`,
+			error: `Could not prepare the metadata work directory ${workRoot}: ${e.message}`,
 			startedAt: startedAt.toISOString(),
 			finishedAt: new Date().toISOString(),
 		};
@@ -631,26 +632,14 @@ async function retrieveMetadata(outputDir) {
 		metadataManifest,
 		'--target-org',
 		userName,
-		// Relative to projectRoot, which is the retrieve's working directory.
-		// An absolute path here is what triggered OutputDirOutsideProjectError.
+		// Relative to workRoot, which is the retrieve's working directory.
 		'--output-dir',
-		relativeOut,
+		RETRIEVE_SUBDIR,
 		// --wait bounds the CLI's own polling; our timeout is the outer bound.
 		'--wait',
 		String(Math.max(1, Math.ceil(metadataTimeoutSeconds / 60))),
 	];
 	if (apiVersion) args.push('--api-version', apiVersion);
-
-	try {
-		fs.mkdirSync(outputDir, { recursive: true });
-	} catch (e) {
-		return {
-			status: METADATA_STATUS.FAILED,
-			error: `Could not create the metadata output directory ${outputDir}: ${e.message}`,
-			startedAt: startedAt.toISOString(),
-			finishedAt: new Date().toISOString(),
-		};
-	}
 
 	out(`Retrieving metadata using ${metadataManifest}${apiVersion ? ` (API ${apiVersion})` : ''}...`);
 
@@ -658,7 +647,7 @@ async function retrieveMetadata(outputDir) {
 	// component -- hundreds of lines that would bury everything else in the
 	// scheduled run's log while telling us nothing we cannot get from the JSON.
 	const res = await runner.sfJson(args, {
-		cwd: projectRoot,
+		cwd: workRoot,
 		timeoutMs: metadataTimeoutSeconds * 1000,
 		onStderrLine: (line) => line.trim() && warn(line),
 	});
@@ -681,6 +670,28 @@ async function retrieveMetadata(outputDir) {
 			auth: classifyFailure(res.raw, detail) === EXIT.AUTH,
 			error: `"sf project retrieve start" failed (exit ${res.raw.code}). ${detail}`.trim(),
 			fileCount: countFiles(outputDir),
+		};
+	}
+
+	// Move the retrieved tree into the backup. A rename is atomic and instant
+	// on the same volume; across volumes (export root on another drive) it
+	// throws EXDEV, so fall back to a recursive copy.
+	try {
+		fs.rmSync(outputDir, { recursive: true, force: true });
+		fs.mkdirSync(path.dirname(outputDir), { recursive: true });
+		try {
+			fs.renameSync(retrieveDir, outputDir);
+		} catch (e) {
+			if (e.code !== 'EXDEV') throw e;
+			fs.cpSync(retrieveDir, outputDir, { recursive: true });
+			fs.rmSync(retrieveDir, { recursive: true, force: true });
+		}
+	} catch (e) {
+		return {
+			...base,
+			status: METADATA_STATUS.FAILED,
+			error: `Metadata was retrieved but could not be moved into ${outputDir}: ${e.message}`,
+			fileCount: 0,
 		};
 	}
 

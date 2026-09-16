@@ -518,6 +518,7 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 				enabled: true,
 				manifest,
 				outputSubdir: 'metadata',
+				workDir: path.join(mdFixtures, 'work'),
 				namespace: 'cja_cj',
 				failureIsFatal: false,
 				timeoutSeconds: 60,
@@ -537,29 +538,32 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 		const dir = r.summary && r.summary.orgs[0].exportDir;
 		check('data still exported', dir && fs.existsSync(path.join(dir, 'cja_cj__CJ_Connector__cs.json')));
 		check('metadata folder created', dir && fs.existsSync(path.join(dir, 'metadata')));
-		check('retrieved files present', dir && fs.existsSync(path.join(dir, 'metadata', 'classes', 'CJThing.cls')));
+		check('retrieved files present', dir && fs.existsSync(path.join(dir, 'metadata', 'classes', 'CJThing_test.cls')));
 		check('metadata summary written', dir && fs.existsSync(path.join(dir, 'metadata', '_metadata-summary.json')));
 		// The mock refuses to run without an sfdx-project.json in its cwd, AND
 		// refuses an --output-dir outside that project -- exactly as the real
 		// CLI does. Reaching this point proves the export folder IS the project.
-		// The project root is the EXPORT ROOT, an ancestor of the export folder
-		// that nothing ever renames -- not the export folder itself.
-		const exportRoot = path.dirname(path.dirname(dir)); // per-run layout: root/runId/org
-		const projectFile = [path.dirname(dir), exportRoot]
-			.map((d) => path.join(d, 'sfdx-project.json'))
-			.find((f) => fs.existsSync(f));
-		check('an SFDX project was created above the export folder', Boolean(projectFile), projectFile);
-		check('the export folder itself is NOT the project root', dir && !fs.existsSync(path.join(dir, 'sfdx-project.json')));
+		// The retrieve happens in its own work directory, entirely outside the
+		// export tree. Nothing SFDX-related is left in the backup.
+		const projectFile = path.join(mdFixtures, 'work', 'sfdx-project.json');
+		check('a scratch SFDX project was created in the work directory', fs.existsSync(projectFile));
+		check('no sfdx-project.json in the backup', dir && !fs.existsSync(path.join(dir, 'sfdx-project.json')));
+		check('no placeholder package dir in the backup', dir && !fs.existsSync(path.join(dir, 'force-app')));
+		check('work dir is outside the export tree', !path.resolve(mdFixtures, 'work').startsWith(path.resolve(r.work)));
 		const scaffold = JSON.parse(fs.readFileSync(projectFile, 'utf8'));
 		check('scaffold carries the namespace', scaffold.namespace === 'cja_cj', scaffold.namespace);
 		check('scaffold takes the API version from the manifest', scaffold.sourceApiVersion === '63.0', scaffold.sourceApiVersion);
-		check('package dir is a placeholder, not the retrieve target', scaffold.packageDirectories[0].path === '_sfdx_placeholder', JSON.stringify(scaffold.packageDirectories));
-		check('--output-dir was passed relative, not absolute', /"--output-dir","[^"\\/][^"]*"/.test(r.calls), (r.calls.match(/"--output-dir","[^"]*"/) || [''])[0]);
-		// The lesson from EPERM: the retrieve's cwd must not be a directory that
-		// gets renamed when the export is swapped into place.
+		check('package dir does not overlap the retrieve target', scaffold.packageDirectories[0].path !== 'retrieved', JSON.stringify(scaffold.packageDirectories));
+		check('--output-dir is a plain relative name', /"--output-dir","retrieved"/.test(r.calls), (r.calls.match(/"--output-dir","[^"]*"/) || [''])[0]);
+		// The lesson from EPERM: the retrieve's cwd must be nowhere near the
+		// export tree, because every folder in there gets renamed.
 		const cwdLine = (r.calls.match(/^RETRIEVE_CWD (.+)$/m) || [])[1];
 		check('retrieve cwd is recorded', Boolean(cwdLine), cwdLine);
-		check('retrieve did NOT run inside the export folder', cwdLine && path.resolve(cwdLine) !== path.resolve(dir), cwdLine);
+		check(
+			'retrieve cwd is outside the entire export tree',
+			cwdLine && !path.resolve(cwdLine).startsWith(path.resolve(r.summary.runExportRoot)),
+			cwdLine
+		);
 		check('retrieve ran with --json, not the wall of table output', /"--json"/.test(r.calls));
 		const md = r.summary.orgs[0].metadata;
 		check('metadata status OK in the run summary', md && md.status === 'OK', md && md.status);
@@ -567,6 +571,35 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 		// Counted before _metadata-summary.json is written, so the number is
 		// what was retrieved rather than what is in the folder afterwards.
 		check('file count recorded', md && md.fileCount === 3, md && String(md.fileCount));
+	}
+
+	// MD1b -- the work directory is reused for every org in a run. If it is not
+	// cleared between them, org A's retrieved components are still sitting there
+	// and get moved into org B's backup: a silent, plausible-looking corruption
+	// of exactly the thing this tool exists to produce.
+	{
+		const r = runScenario("MD1b two orgs -> neither backup contains the other's metadata", {
+			orgs: [
+				scratchOrg({ username: 'alpha@example.com', alias: 'org-alpha', orgId: '00D000000000096AAA' }),
+				scratchOrg({ username: 'bravo@example.com', alias: 'org-bravo', orgId: '00D000000000097AAA' }),
+			],
+			orgFixtures: {
+				// alpha's retrieve dies part-way, leaving files in the work dir.
+				'alpha@example.com': { describe: 'ok', export: 'ok', metadata: 'partial' },
+				'bravo@example.com': { describe: 'ok', export: 'ok', metadata: 'ok' },
+			},
+			config: mdConfig({ workDir: path.join(mdFixtures, 'work-shared') }),
+		});
+		check('both data exports succeeded despite the metadata failure', r.code === 0 && r.summary && r.summary.success === 2, `code ${r.code}`);
+		const byAlias = Object.fromEntries((r.summary ? r.summary.orgs : []).map((o) => [o.alias, o.exportDir]));
+		const classesOf = (d) => {
+			try { return fs.readdirSync(path.join(d, 'metadata', 'classes')); } catch (_) { return []; }
+		};
+		const alpha = classesOf(byAlias['org-alpha']);
+		const bravo = classesOf(byAlias['org-bravo']);
+		check('alpha kept no metadata folder (its retrieve failed)', alpha.length === 0, alpha.join(','));
+		check('bravo has its own component', bravo.includes('CJThing_bravo.cls'), bravo.join(','));
+		check("bravo did NOT inherit alpha's abandoned component", !bravo.includes('CJThing_alpha.cls'), bravo.join(','));
 	}
 
 	// MD2 -- a manifest entry that does not exist in the org. The retrieve
