@@ -681,7 +681,31 @@ function messageOf(res) {
 		}
 	}
 	if (res.raw && res.raw.stderr) parts.push(res.raw.stderr);
-	return stripCliNoise(parts.filter(Boolean).join(' | ')).slice(0, 2000);
+	// When --json output could not be parsed, the CLI's own error text is
+	// sitting unread on stdout. Without this, such a failure has no message.
+	if (!res.json && res.raw && res.raw.stdout) parts.push(res.raw.stdout);
+
+	const detail = stripCliNoise(parts.filter(Boolean).join(' | ')).slice(0, 2000);
+	if (detail) return detail;
+
+	// Never return an empty string. A blank reason -- "failed with an
+	// unrecognised error:" and nothing after the colon -- is the single worst
+	// thing this can report, because it gives whoever reads the log at 2am no
+	// thread at all to pull. Say what we DO know: the exit code, and whatever
+	// the CLI actually printed, unfiltered (the noise filter is what can empty
+	// this out in the first place, so it is deliberately not applied here).
+	const code = res.raw && res.raw.code !== undefined ? res.raw.code : null;
+	const rawOutput = [res.raw && res.raw.stdout, res.raw && res.raw.stderr]
+		.filter(Boolean)
+		.join(' ')
+		.replace(/\s+/g, ' ')
+		.trim()
+		.slice(0, 300);
+	return (
+		`the CLI exited ${code === null ? 'with an unknown code' : code} and produced no parseable error` +
+		(res.json ? '' : '; its --json output could not be read') +
+		(rawOutput ? `. Raw output: ${rawOutput}` : '. It printed nothing at all.')
+	);
 }
 
 const includesAny = (haystack, needles) => {
@@ -837,7 +861,6 @@ function buildChildArgs(cfg, org, exportDir) {
 	if (mdEnabled && mdManifest) {
 		args.push('--metadata-manifest', mdManifest);
 		args.push('--metadata-subdir', md.outputSubdir || 'metadata');
-		args.push('--metadata-project', md.projectDir);
 		if (md.namespace) args.push('--metadata-namespace', md.namespace);
 		if (md.apiVersion) args.push('--metadata-api-version', String(md.apiVersion));
 		args.push('--metadata-timeout', String(md.timeoutSeconds || 900));

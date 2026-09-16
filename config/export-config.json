@@ -25,7 +25,6 @@
   "metadata": {
     "enabled": false,
     "manifest": "config/package.xml",
-    "projectDir": "metadata-project",
     "outputSubdir": "metadata",
     "namespace": "cja_cj",
     "apiVersion": "",

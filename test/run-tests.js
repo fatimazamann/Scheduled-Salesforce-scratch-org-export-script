@@ -480,6 +480,24 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 	check('truncation recorded in the manifest', manifest.truncationWarnings.length >= 1);
 }
 
+// --- A skip reason must never be blank --------------------------------------------
+// A real run reported "Package check failed with an unrecognised error:" with
+// nothing after the colon: the CLI's only output was its own update nag, which
+// the noise filter strips, leaving an empty message. A skipped org with no
+// stated reason is undiagnosable after the fact.
+{
+	const r = runScenario('MSG unparseable CLI output -> still says something useful', {
+		orgs: [scratchOrg({ username: 'g@example.com', alias: 'garbage-org', orgId: '00D000000000095AAA' })],
+		orgFixtures: { 'g@example.com': { describe: 'garbage' } },
+	});
+	check('org is skipped, run still succeeds', r.code === 0, `got ${r.code}`);
+	const reason = (r.summary && r.summary.orgs[0].reason) || '';
+	check('reason is not blank', reason.trim().length > 0 && !/error:\s*$/.test(reason), JSON.stringify(reason));
+	check('reason names the exit code', /exited 1/.test(reason), reason);
+	check('reason says the JSON could not be read', /could not be read/.test(reason), reason);
+	check('reason quotes what the CLI actually printed', /update available/.test(reason), reason);
+}
+
 // --- Metadata retrieve -----------------------------------------------------------
 // The governing rule for this whole block: metadata is a SEPARATE deliverable
 // from data. It must never be able to discard a data export that succeeded,
@@ -499,7 +517,6 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 			{
 				enabled: true,
 				manifest,
-				projectDir: path.join(mdFixtures, 'project'),
 				outputSubdir: 'metadata',
 				namespace: 'cja_cj',
 				failureIsFatal: false,
@@ -522,12 +539,15 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 		check('metadata folder created', dir && fs.existsSync(path.join(dir, 'metadata')));
 		check('retrieved files present', dir && fs.existsSync(path.join(dir, 'metadata', 'classes', 'CJThing.cls')));
 		check('metadata summary written', dir && fs.existsSync(path.join(dir, 'metadata', '_metadata-summary.json')));
-		// The mock refuses to run without an sfdx-project.json in its cwd, so
-		// reaching this point at all proves the scaffold was created.
-		check('SFDX project scaffold created', fs.existsSync(path.join(mdFixtures, 'project', 'sfdx-project.json')));
-		const scaffold = JSON.parse(fs.readFileSync(path.join(mdFixtures, 'project', 'sfdx-project.json'), 'utf8'));
+		// The mock refuses to run without an sfdx-project.json in its cwd, AND
+		// refuses an --output-dir outside that project -- exactly as the real
+		// CLI does. Reaching this point proves the export folder IS the project.
+		check('export folder is itself an SFDX project', dir && fs.existsSync(path.join(dir, 'sfdx-project.json')));
+		const scaffold = JSON.parse(fs.readFileSync(path.join(dir, 'sfdx-project.json'), 'utf8'));
 		check('scaffold carries the namespace', scaffold.namespace === 'cja_cj', scaffold.namespace);
 		check('scaffold takes the API version from the manifest', scaffold.sourceApiVersion === '63.0', scaffold.sourceApiVersion);
+		check('metadata folder is the package directory', scaffold.packageDirectories[0].path === 'metadata', JSON.stringify(scaffold.packageDirectories));
+		check('--output-dir was passed relative, not absolute', /"--output-dir","metadata"/.test(r.calls), r.calls.slice(0,400));
 		check('retrieve ran with --json, not the wall of table output', /"--json"/.test(r.calls));
 		const md = r.summary.orgs[0].metadata;
 		check('metadata status OK in the run summary', md && md.status === 'OK', md && md.status);
@@ -680,7 +700,6 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 				'--sf-cli-entry', path.join('test', 'mock-sf.js'),
 				'--clean-script', path.join('test', 'mock-clean-json.js'),
 				'--metadata-manifest', path.join('config', 'package.xml'),
-				'--metadata-project', path.join(base, 'proj'),
 			],
 			{ cwd: ROOT, encoding: 'utf8', env: Object.assign({}, process.env, { MOCK_SF_FIXTURE: fixture }) }
 		);

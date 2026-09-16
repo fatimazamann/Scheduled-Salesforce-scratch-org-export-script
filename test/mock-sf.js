@@ -73,6 +73,13 @@ if (cmd.startsWith('sobject describe')) {
 		case 'error':
 			emit({ status: 1, name: 'SomethingElse', message: 'kaboom' }, 1);
 			break;
+		case 'garbage':
+			// Unparseable --json output whose only readable line is the CLI's own
+			// update nag -- which the noise filter strips, leaving nothing. This
+			// is what produced a blank "unrecognised error:" in a real run.
+			process.stdout.write(' »   Warning: @salesforce/cli update available from 2.118.20 to 2.150.6.\n');
+			process.exit(1);
+			break;
 		default:
 			emit({ status: 0, result: { name: flag('--sobject'), fields: [] } });
 	}
@@ -94,6 +101,21 @@ if (cmd.startsWith('project retrieve')) {
 			status: 1,
 			name: 'InvalidProjectWorkspaceError',
 			message: 'This directory does not contain a valid Salesforce DX project.',
+		}, 1);
+	}
+	// The real CLI refuses an --output-dir that resolves outside the project it
+	// is running in. Enforcing it here is the whole reason this mock exists:
+	// without it, a design that cannot work in production passes every test.
+	const outDirArg = flag('--output-dir') || '';
+	const resolvedOut = path.resolve(process.cwd(), outDirArg);
+	const projectRoot = path.resolve(process.cwd());
+	if (resolvedOut !== projectRoot && !resolvedOut.startsWith(projectRoot + path.sep)) {
+		emit({
+			status: 1,
+			name: 'OutputDirOutsideProjectError',
+			message:
+				'The output directory must be inside the current project. ' +
+				`The path relative you provided ${outDirArg} is outside the project root.`,
 		}, 1);
 	}
 	if (o.metadata === 'fail') {

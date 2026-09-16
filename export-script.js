@@ -120,7 +120,6 @@ const SPEC = {
 	cleanScript: { long: 'clean-script', default: '', description: 'Path to clean-json.js (default: alongside this script)' },
 	metadataManifest: { long: 'metadata-manifest', default: '', description: 'package.xml to retrieve metadata with; omit to skip metadata entirely' },
 	metadataSubdir: { long: 'metadata-subdir', default: 'metadata', description: 'Folder under --dir the metadata is written into' },
-	metadataProject: { long: 'metadata-project', default: '', description: 'SFDX project folder the retrieve runs in (created if missing)' },
 	metadataNamespace: { long: 'metadata-namespace', default: '', description: "Namespace the manifest's unprefixed names resolve against" },
 	metadataApiVersion: { long: 'metadata-api-version', default: '', description: "API version for the retrieve; default: the manifest's own <version>" },
 	metadataTimeout: { long: 'metadata-timeout', default: '900', description: 'Timeout in seconds for the metadata retrieve' },
@@ -526,12 +525,11 @@ function manifestApiVersion(manifestPath) {
  * We create it if it is missing rather than requiring a committed scaffold, so
  * a fresh checkout on a new machine works with no manual setup step.
  */
-function ensureSfdxProject(projectDir, apiVersion) {
-	fs.mkdirSync(path.join(projectDir, 'force-app'), { recursive: true });
-	const projectFile = path.join(projectDir, 'sfdx-project.json');
-	if (fs.existsSync(projectFile)) return projectFile;
+function ensureSfdxProject(projectRoot, packageDir, apiVersion) {
+	fs.mkdirSync(path.join(projectRoot, packageDir), { recursive: true });
+	const projectFile = path.join(projectRoot, 'sfdx-project.json');
 	const project = {
-		packageDirectories: [{ path: 'force-app', default: true }],
+		packageDirectories: [{ path: packageDir, default: true }],
 		namespace: metadataNamespace || '',
 		sfdcLoginUrl: 'https://login.salesforce.com',
 		sourceApiVersion: apiVersion || '63.0',
@@ -568,26 +566,22 @@ async function retrieveMetadata(outputDir) {
 	const startedAt = new Date();
 	const apiVersion = metadataApiVersionFlag || manifestApiVersion(metadataManifest) || '';
 
-	let projectDir = options.metadataProject
-		? path.resolve(process.cwd(), options.metadataProject)
-		: path.resolve(__dirname, 'metadata-project');
+	// `sf project retrieve start` REFUSES an --output-dir outside the SFDX
+	// project it is running in (OutputDirOutsideProjectError). So the project
+	// root is the export folder itself, not some scaffold elsewhere: we drop an
+	// sfdx-project.json beside the exported data and retrieve into a package
+	// directory under it.
+	//
+	// The useful side effect is that each backup folder is then a valid SFDX
+	// project in its own right -- `sf project deploy start` works straight out
+	// of it, with no reassembly.
+	const projectRoot = directoryPath;
 	try {
-		ensureSfdxProject(projectDir, apiVersion);
+		ensureSfdxProject(projectRoot, metadataSubdir, apiVersion);
 	} catch (e) {
 		return {
 			status: METADATA_STATUS.FAILED,
-			error: `Could not prepare the SFDX project folder ${projectDir}: ${e.message}`,
-			startedAt: startedAt.toISOString(),
-			finishedAt: new Date().toISOString(),
-		};
-	}
-
-	try {
-		fs.mkdirSync(outputDir, { recursive: true });
-	} catch (e) {
-		return {
-			status: METADATA_STATUS.FAILED,
-			error: `Could not create metadata output directory ${outputDir}: ${e.message}`,
+			error: `Could not prepare the SFDX project in ${projectRoot}: ${e.message}`,
 			startedAt: startedAt.toISOString(),
 			finishedAt: new Date().toISOString(),
 		};
@@ -601,8 +595,10 @@ async function retrieveMetadata(outputDir) {
 		metadataManifest,
 		'--target-org',
 		userName,
+		// Relative to projectRoot, which is the retrieve's working directory.
+		// An absolute path here is what triggered OutputDirOutsideProjectError.
 		'--output-dir',
-		outputDir,
+		metadataSubdir,
 		// --wait bounds the CLI's own polling; our timeout is the outer bound.
 		'--wait',
 		String(Math.max(1, Math.ceil(metadataTimeoutSeconds / 60))),
@@ -615,7 +611,7 @@ async function retrieveMetadata(outputDir) {
 	// component -- hundreds of lines that would bury everything else in the
 	// scheduled run's log while telling us nothing we cannot get from the JSON.
 	const res = await runner.sfJson(args, {
-		cwd: projectDir,
+		cwd: projectRoot,
 		timeoutMs: metadataTimeoutSeconds * 1000,
 		onStderrLine: (line) => line.trim() && warn(line),
 	});
