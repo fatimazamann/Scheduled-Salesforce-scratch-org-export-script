@@ -542,12 +542,24 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 		// The mock refuses to run without an sfdx-project.json in its cwd, AND
 		// refuses an --output-dir outside that project -- exactly as the real
 		// CLI does. Reaching this point proves the export folder IS the project.
-		check('export folder is itself an SFDX project', dir && fs.existsSync(path.join(dir, 'sfdx-project.json')));
-		const scaffold = JSON.parse(fs.readFileSync(path.join(dir, 'sfdx-project.json'), 'utf8'));
+		// The project root is the EXPORT ROOT, an ancestor of the export folder
+		// that nothing ever renames -- not the export folder itself.
+		const exportRoot = path.dirname(path.dirname(dir)); // per-run layout: root/runId/org
+		const projectFile = [path.dirname(dir), exportRoot]
+			.map((d) => path.join(d, 'sfdx-project.json'))
+			.find((f) => fs.existsSync(f));
+		check('an SFDX project was created above the export folder', Boolean(projectFile), projectFile);
+		check('the export folder itself is NOT the project root', dir && !fs.existsSync(path.join(dir, 'sfdx-project.json')));
+		const scaffold = JSON.parse(fs.readFileSync(projectFile, 'utf8'));
 		check('scaffold carries the namespace', scaffold.namespace === 'cja_cj', scaffold.namespace);
 		check('scaffold takes the API version from the manifest', scaffold.sourceApiVersion === '63.0', scaffold.sourceApiVersion);
-		check('metadata folder is the package directory', scaffold.packageDirectories[0].path === 'metadata', JSON.stringify(scaffold.packageDirectories));
-		check('--output-dir was passed relative, not absolute', /"--output-dir","metadata"/.test(r.calls), r.calls.slice(0,400));
+		check('package dir is a placeholder, not the retrieve target', scaffold.packageDirectories[0].path === '_sfdx_placeholder', JSON.stringify(scaffold.packageDirectories));
+		check('--output-dir was passed relative, not absolute', /"--output-dir","[^"\\/][^"]*"/.test(r.calls), (r.calls.match(/"--output-dir","[^"]*"/) || [''])[0]);
+		// The lesson from EPERM: the retrieve's cwd must not be a directory that
+		// gets renamed when the export is swapped into place.
+		const cwdLine = (r.calls.match(/^RETRIEVE_CWD (.+)$/m) || [])[1];
+		check('retrieve cwd is recorded', Boolean(cwdLine), cwdLine);
+		check('retrieve did NOT run inside the export folder', cwdLine && path.resolve(cwdLine) !== path.resolve(dir), cwdLine);
 		check('retrieve ran with --json, not the wall of table output', /"--json"/.test(r.calls));
 		const md = r.summary.orgs[0].metadata;
 		check('metadata status OK in the run summary', md && md.status === 'OK', md && md.status);

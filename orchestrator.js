@@ -1330,7 +1330,17 @@ async function main() {
 			}
 			if (outcome.status !== STATUS.SUCCESS) {
 				// Discard the partial export; the previous folder is untouched.
-				fs.rmSync(workDir, { recursive: true, force: true });
+				// Cleanup must never be able to abort the run: on Windows a
+				// directory can be briefly undeletable (a process used it as its
+				// working directory, an indexer or scanner has it open), and
+				// leaving a temp folder behind is a far smaller problem than
+				// throwing away every org still queued behind this one. Stale
+				// temp folders are swept at the start of the next run.
+				try {
+					fs.rmSync(workDir, { recursive: true, force: true });
+				} catch (err) {
+					log.warn(`Could not remove the working directory ${workDir}: ${err.message}. It will be cleaned up on the next run.`);
+				}
 			}
 			const orgEnd = new Date();
 

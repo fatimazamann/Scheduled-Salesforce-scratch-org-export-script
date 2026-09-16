@@ -120,6 +120,7 @@ const SPEC = {
 	cleanScript: { long: 'clean-script', default: '', description: 'Path to clean-json.js (default: alongside this script)' },
 	metadataManifest: { long: 'metadata-manifest', default: '', description: 'package.xml to retrieve metadata with; omit to skip metadata entirely' },
 	metadataSubdir: { long: 'metadata-subdir', default: 'metadata', description: 'Folder under --dir the metadata is written into' },
+	metadataProject: { long: 'metadata-project', default: '', description: 'Directory to use as the SFDX project root; must contain --dir (default: its parent)' },
 	metadataNamespace: { long: 'metadata-namespace', default: '', description: "Namespace the manifest's unprefixed names resolve against" },
 	metadataApiVersion: { long: 'metadata-api-version', default: '', description: "API version for the retrieve; default: the manifest's own <version>" },
 	metadataTimeout: { long: 'metadata-timeout', default: '900', description: 'Timeout in seconds for the metadata retrieve' },
@@ -525,11 +526,22 @@ function manifestApiVersion(manifestPath) {
  * We create it if it is missing rather than requiring a committed scaffold, so
  * a fresh checkout on a new machine works with no manual setup step.
  */
-function ensureSfdxProject(projectRoot, packageDir, apiVersion) {
-	fs.mkdirSync(path.join(projectRoot, packageDir), { recursive: true });
+/**
+ * The package directory is a placeholder that exists only to satisfy
+ * sfdx-project.json. It must NOT be the retrieve target: the CLI rejects an
+ * --output-dir that overlaps a package directory
+ * (RetrieveTargetDirOverlapsPackageError).
+ */
+const SFDX_PLACEHOLDER_DIR = '_sfdx_placeholder';
+
+function ensureSfdxProject(projectRoot, apiVersion) {
 	const projectFile = path.join(projectRoot, 'sfdx-project.json');
+	// Never clobber a real project. If someone points the export root at a
+	// directory that already is an SFDX project, that is their file, not ours.
+	if (fs.existsSync(projectFile)) return projectFile;
+	fs.mkdirSync(path.join(projectRoot, SFDX_PLACEHOLDER_DIR), { recursive: true });
 	const project = {
-		packageDirectories: [{ path: packageDir, default: true }],
+		packageDirectories: [{ path: SFDX_PLACEHOLDER_DIR, default: true }],
 		namespace: metadataNamespace || '',
 		sfdcLoginUrl: 'https://login.salesforce.com',
 		sourceApiVersion: apiVersion || '63.0',
@@ -566,18 +578,42 @@ async function retrieveMetadata(outputDir) {
 	const startedAt = new Date();
 	const apiVersion = metadataApiVersionFlag || manifestApiVersion(metadataManifest) || '';
 
-	// `sf project retrieve start` REFUSES an --output-dir outside the SFDX
-	// project it is running in (OutputDirOutsideProjectError). So the project
-	// root is the export folder itself, not some scaffold elsewhere: we drop an
-	// sfdx-project.json beside the exported data and retrieve into a package
-	// directory under it.
+	// Three constraints have to be satisfied at once, and they were learned the
+	// hard way -- each one produced a different production failure:
 	//
-	// The useful side effect is that each backup folder is then a valid SFDX
-	// project in its own right -- `sf project deploy start` works straight out
-	// of it, with no reassembly.
-	const projectRoot = directoryPath;
+	//   1. The retrieve must run inside an SFDX project, or the CLI refuses
+	//      outright (InvalidProjectWorkspaceError).
+	//   2. --output-dir must be INSIDE that project (OutputDirOutsideProjectError),
+	//      so the project root has to be an ancestor of the export folder.
+	//   3. --output-dir must NOT overlap a package directory
+	//      (RetrieveTargetDirOverlapsPackageError), so the package directory is
+	//      an empty placeholder somewhere else in the project.
+	//
+	// And one that is not a CLI rule at all: the project root becomes the
+	// child process's working directory, and on Windows a directory that a
+	// process has used as its cwd cannot be renamed or deleted afterwards. The
+	// export folder is renamed at the end of every run, so it must NOT be the
+	// project root -- doing that made the atomic swap fail with EPERM and took
+	// the whole run down with it.
+	//
+	// The export ROOT satisfies all four: it is an ancestor of the export
+	// folder, it is stable, and nothing ever renames it.
+	const projectRoot = options.metadataProject
+		? path.resolve(process.cwd(), options.metadataProject)
+		: path.dirname(directoryPath);
+	const relativeOut = path.relative(projectRoot, outputDir);
+	if (!relativeOut || relativeOut.startsWith('..') || path.isAbsolute(relativeOut)) {
+		return {
+			status: METADATA_STATUS.FAILED,
+			error:
+				`The metadata output directory ${outputDir} is not inside the SFDX project root ${projectRoot}, ` +
+				`which the Salesforce CLI requires. Pass --metadata-project with a directory that contains the export folder.`,
+			startedAt: startedAt.toISOString(),
+			finishedAt: new Date().toISOString(),
+		};
+	}
 	try {
-		ensureSfdxProject(projectRoot, metadataSubdir, apiVersion);
+		ensureSfdxProject(projectRoot, apiVersion);
 	} catch (e) {
 		return {
 			status: METADATA_STATUS.FAILED,
@@ -598,12 +634,23 @@ async function retrieveMetadata(outputDir) {
 		// Relative to projectRoot, which is the retrieve's working directory.
 		// An absolute path here is what triggered OutputDirOutsideProjectError.
 		'--output-dir',
-		metadataSubdir,
+		relativeOut,
 		// --wait bounds the CLI's own polling; our timeout is the outer bound.
 		'--wait',
 		String(Math.max(1, Math.ceil(metadataTimeoutSeconds / 60))),
 	];
 	if (apiVersion) args.push('--api-version', apiVersion);
+
+	try {
+		fs.mkdirSync(outputDir, { recursive: true });
+	} catch (e) {
+		return {
+			status: METADATA_STATUS.FAILED,
+			error: `Could not create the metadata output directory ${outputDir}: ${e.message}`,
+			startedAt: startedAt.toISOString(),
+			finishedAt: new Date().toISOString(),
+		};
+	}
 
 	out(`Retrieving metadata using ${metadataManifest}${apiVersion ? ` (API ${apiVersion})` : ''}...`);
 

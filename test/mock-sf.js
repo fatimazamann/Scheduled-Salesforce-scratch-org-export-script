@@ -118,6 +118,32 @@ if (cmd.startsWith('project retrieve')) {
 				`The path relative you provided ${outDirArg} is outside the project root.`,
 		}, 1);
 	}
+	// ...and it must not overlap a package directory, which is a SEPARATE rule
+	// the real CLI enforces (RetrieveTargetDirOverlapsPackageError).
+	let pkgDirs = [];
+	try {
+		pkgDirs = (JSON.parse(fs.readFileSync(path.join(process.cwd(), 'sfdx-project.json'), 'utf8')).packageDirectories || [])
+			.map((d) => path.resolve(process.cwd(), d.path));
+	} catch (_) {
+		/* already validated above */
+	}
+	for (const pkg of pkgDirs) {
+		if (resolvedOut === pkg || resolvedOut.startsWith(pkg + path.sep) || pkg.startsWith(resolvedOut + path.sep)) {
+			emit({
+				status: 1,
+				name: 'RetrieveTargetDirOverlapsPackageError',
+				message:
+					`The retrieve target directory [${outDirArg}] overlaps one of your package directories. ` +
+					'Specify a different retrieve target directory and try again.',
+			}, 1);
+		}
+	}
+	// Record the working directory so tests can assert it is NOT a directory the
+	// orchestrator later renames. On Windows a process's cwd cannot be renamed
+	// or deleted afterwards, which broke the atomic swap with EPERM.
+	if (process.env.MOCK_SF_CALLLOG) {
+		fs.appendFileSync(process.env.MOCK_SF_CALLLOG, `RETRIEVE_CWD ${process.cwd()}\n`);
+	}
 	if (o.metadata === 'fail') {
 		emit({ status: 1, name: 'SfError', message: 'INVALID_TYPE: Cannot retrieve metadata type Nonsense' }, 1);
 	}
