@@ -33,6 +33,8 @@ Windows Task Scheduler
 | `test/run-tests.js` | 211 assertions against a mock CLI. No org, no network, no credentials. |
 | `test/mock-sf.js` | A fake `sf` driven by a JSON fixture — lets tests exercise dead orgs, expired orgs, auth failures and truncation without any of them being real. |
 | `docs/SETUP.md` | Bring-up on a new machine. |
+| `docs/DESIGN.md` | What the system does and why it is built this way. |
+| `docs/architecture.drawio` | Architecture and per-org flow diagrams (open at diagrams.net). |
 
 **Why the parent/child split.** One org failing must not stop the others. Because each org export is a separate OS process, a crash, a hang or an out-of-memory in one org is contained — the parent sees an exit code and moves on. Sharing one process would put every org at the mercy of the worst one.
 
