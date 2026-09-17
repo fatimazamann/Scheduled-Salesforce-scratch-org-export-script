@@ -54,7 +54,7 @@ No `npm install` — there are no dependencies.
 node test\run-tests.js
 ```
 
-Expect `215 passed, 0 failed`. Runs against a mock CLI — no org, no network.
+Expect `232 passed, 0 failed`. Runs against a mock CLI — no org, no network.
 
 ## 5. Run it
 
