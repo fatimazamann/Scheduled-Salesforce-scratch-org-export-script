@@ -39,6 +39,7 @@ const { parseArgs, renderHelp, ArgError } = require('./lib/args');
 const sfcli = require('./lib/sf-cli');
 const { escapeSoqlString, parseConnectorList, soqlStringList } = require('./lib/soql');
 const { redactText } = require('./lib/logger');
+const { isSafeSubdir } = require('./lib/config');
 
 const EXIT = {
 	SUCCESS: 0,
@@ -125,6 +126,7 @@ const SPEC = {
 	metadataApiVersion: { long: 'metadata-api-version', default: '', description: "API version for the retrieve; default: the manifest's own <version>" },
 	metadataTimeout: { long: 'metadata-timeout', default: '900', description: 'Timeout in seconds for the metadata retrieve' },
 	metadataRequired: { long: 'metadata-required', boolean: true, description: 'Fail the whole export if the metadata retrieve fails' },
+	noSfdxProject: { long: 'no-sfdx-project', boolean: true, description: 'Do not write an sfdx-project.json into the backup folder' },
 	timeout: { long: 'timeout', default: '900', description: 'Timeout in seconds for each sf command' },
 	quiet: { long: 'quiet', boolean: true, description: 'Suppress informational output' },
 	help: { long: 'help', short: 'h', boolean: true, description: 'Show this help' },
@@ -253,8 +255,12 @@ if (metadataEnabled && !fs.existsSync(metadataManifest)) {
 	die(EXIT.INVALID_ARGUMENTS, `--metadata-manifest does not exist: ${metadataManifest}`);
 }
 const metadataSubdir = String(options.metadataSubdir || 'metadata').trim();
-if (metadataEnabled && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(metadataSubdir)) {
-	die(EXIT.INVALID_ARGUMENTS, `--metadata-subdir must be a single plain folder name, got ${JSON.stringify(metadataSubdir)}.`);
+if (metadataEnabled && !isSafeSubdir(metadataSubdir)) {
+	die(
+		EXIT.INVALID_ARGUMENTS,
+		`--metadata-subdir must be a relative folder path inside the export folder ` +
+			`(e.g. "metadata" or "force-app/main/default"), got ${JSON.stringify(metadataSubdir)}.`
+	);
 }
 const metadataNamespace = String(options.metadataNamespace || '').trim();
 if (metadataNamespace && !/^[A-Za-z][A-Za-z0-9_]{0,14}$/.test(metadataNamespace)) {
@@ -693,6 +699,35 @@ async function retrieveMetadata(outputDir) {
 			error: `Metadata was retrieved but could not be moved into ${outputDir}: ${e.message}`,
 			fileCount: 0,
 		};
+	}
+
+	// Make the backup itself a deployable DX project. The package directory is
+	// the FIRST segment of the output subdir, so "force-app/main/default" gives
+	// packageDirectories [{ path: "force-app" }] and `sf project deploy start`
+	// works from inside the backup with nothing to copy.
+	//
+	// Writing this file here is safe: nothing ever uses the backup folder as a
+	// working directory. Making it the retrieve's cwd is the mistake that broke
+	// the atomic swap with EPERM, and this is not that.
+	if (options.noSfdxProject !== true) {
+		try {
+			const pkgDir = metadataSubdir.split(/[\\/]+/).filter(Boolean)[0];
+			fs.writeFileSync(
+				path.join(directoryPath, 'sfdx-project.json'),
+				`${JSON.stringify(
+					{
+						packageDirectories: [{ path: pkgDir, default: true }],
+						namespace: metadataNamespace || '',
+						sfdcLoginUrl: 'https://login.salesforce.com',
+						sourceApiVersion: apiVersion || '63.0',
+					},
+					null,
+					2
+				)}\n`
+			);
+		} catch (e) {
+			warn(`Could not write sfdx-project.json into the backup: ${e.message}`);
+		}
 	}
 
 	const result = res.result || {};

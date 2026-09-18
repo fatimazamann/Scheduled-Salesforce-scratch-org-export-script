@@ -25,7 +25,7 @@
   "metadata": {
     "enabled": true,
     "manifest": "config/package.xml",
-    "outputSubdir": "metadata",
+    "outputSubdir": "force-app/main/default",
     "workDir": ".metadata-work",
     "namespace": "cja_cj",
     "apiVersion": "",

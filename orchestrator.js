@@ -862,6 +862,7 @@ function buildChildArgs(cfg, org, exportDir) {
 		args.push('--metadata-manifest', mdManifest);
 		args.push('--metadata-subdir', md.outputSubdir || 'metadata');
 		if (md.workDir) args.push('--metadata-work-dir', md.workDir);
+		if (md.writeSfdxProject === false) args.push('--no-sfdx-project');
 		if (md.namespace) args.push('--metadata-namespace', md.namespace);
 		if (md.apiVersion) args.push('--metadata-api-version', String(md.apiVersion));
 		args.push('--metadata-timeout', String(md.timeoutSeconds || 900));

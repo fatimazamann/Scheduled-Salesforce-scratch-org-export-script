@@ -547,8 +547,12 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 		// export tree. Nothing SFDX-related is left in the backup.
 		const projectFile = path.join(mdFixtures, 'work', 'sfdx-project.json');
 		check('a scratch SFDX project was created in the work directory', fs.existsSync(projectFile));
-		check('no sfdx-project.json in the backup', dir && !fs.existsSync(path.join(dir, 'sfdx-project.json')));
-		check('no placeholder package dir in the backup', dir && !fs.existsSync(path.join(dir, 'force-app')));
+		// The backup gets its own sfdx-project.json so it deploys as-is. This is
+		// NOT the mistake that caused EPERM -- that was making the backup folder
+		// the retrieve's working directory. This is a file written afterwards.
+		check('backup carries an sfdx-project.json', dir && fs.existsSync(path.join(dir, 'sfdx-project.json')));
+		const backupProject = JSON.parse(fs.readFileSync(path.join(dir, 'sfdx-project.json'), 'utf8'));
+		check('its package dir is the output subdir', backupProject.packageDirectories[0].path === 'metadata', JSON.stringify(backupProject.packageDirectories));
 		check('work dir is outside the export tree', !path.resolve(mdFixtures, 'work').startsWith(path.resolve(r.work)));
 		const scaffold = JSON.parse(fs.readFileSync(projectFile, 'utf8'));
 		check('scaffold carries the namespace', scaffold.namespace === 'cja_cj', scaffold.namespace);
@@ -600,6 +604,25 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 		check('alpha kept no metadata folder (its retrieve failed)', alpha.length === 0, alpha.join(','));
 		check('bravo has its own component', bravo.includes('CJThing_bravo.cls'), bravo.join(','));
 		check("bravo did NOT inherit alpha's abandoned component", !bravo.includes('CJThing_alpha.cls'), bravo.join(','));
+	}
+
+	// MD10 -- force-app layout: the backup is a DX project you can deploy from.
+	{
+		const r = runScenario('MD10 force-app layout -> backup is a deployable DX project', {
+			orgs: [scratchOrg({ username: 'fa@example.com', alias: 'fa-org', orgId: '00D000000000098AAA' })],
+			orgFixtures: { 'fa@example.com': { describe: 'ok', export: 'ok', metadata: 'ok' } },
+			config: mdConfig({ outputSubdir: 'force-app/main/default', workDir: path.join(mdFixtures, 'work-fa') }),
+		});
+		check('exit code 0', r.code === 0, `got ${r.code}\n${r.stderr.slice(-400)}`);
+		const dir = r.summary && r.summary.orgs[0].exportDir;
+		check('metadata landed under force-app/main/default', dir && fs.existsSync(path.join(dir, 'force-app', 'main', 'default', 'classes')), dir);
+		check('data files still sit at the backup root', dir && fs.existsSync(path.join(dir, 'cja_cj__CJ_Connector__cs.json')));
+		const proj = dir && fs.existsSync(path.join(dir, 'sfdx-project.json'))
+			? JSON.parse(fs.readFileSync(path.join(dir, 'sfdx-project.json'), 'utf8'))
+			: null;
+		check('sfdx-project.json written at the backup root', Boolean(proj));
+		check('package dir is the FIRST segment, not the whole path', proj && proj.packageDirectories[0].path === 'force-app', proj && JSON.stringify(proj.packageDirectories));
+		check('namespace carried through', proj && proj.namespace === 'cja_cj');
 	}
 
 	// MD2 -- a manifest entry that does not exist in the org. The retrieve
@@ -770,8 +793,13 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 				return e instanceof ConfigError && pattern.test(e.message);
 			}
 		};
-		check('rejects a subdir containing a path separator', rejects({ outputSubdir: 'a/b' }, /single plain folder name/));
-		check('rejects a subdir that escapes the export folder', rejects({ outputSubdir: '..' }, /single plain folder name/));
+		// A nested layout is the whole point of allowing separators; escaping the
+		// export folder is the thing that must stay impossible.
+		check('accepts a nested source layout', !rejects({ outputSubdir: 'force-app/main/default' }, /./));
+		check('rejects a subdir that escapes upward', rejects({ outputSubdir: '..' }, /relative folder path/));
+		check('rejects an escape hidden mid-path', rejects({ outputSubdir: 'force-app/../../etc' }, /relative folder path/));
+		check('rejects an absolute path', rejects({ outputSubdir: '/etc' }, /relative folder path/));
+		check('rejects a drive-relative path', rejects({ outputSubdir: 'C:evil' }, /relative folder path/));
 		check('rejects a bad namespace', rejects({ namespace: 'not a namespace' }, /namespace/));
 		check('rejects a bad API version', rejects({ apiVersion: '63' }, /apiVersion/));
 		check('rejects an empty manifest path', rejects({ manifest: '' }, /metadata.manifest/));
