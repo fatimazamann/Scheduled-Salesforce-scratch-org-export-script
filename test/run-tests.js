@@ -777,7 +777,12 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 		check('rejects an empty manifest path', rejects({ manifest: '' }, /metadata.manifest/));
 		const ok = loadConfig({ overrides: { metadata: { enabled: true, manifest } }, env: {} });
 		check('resolves the manifest to an absolute path', path.isAbsolute(ok.metadata.manifest));
-		check('metadata is off by default', loadConfig({ env: {} }).metadata.enabled === false);
+		// Assert the DEFAULT, not the shipped config file. loadConfig() with no
+		// configPath reads config/export-config.json, so the original version of
+		// this check was really testing whatever that file happened to say -- and
+		// broke the moment metadata was switched on for real. A fresh checkout
+		// with no config file is what "off by default" actually means.
+		check('metadata is off unless configured on', require('../lib/config').DEFAULTS.metadata.enabled === false);
 		check(
 			'SFEXPORT_METADATA can switch it on without editing the config',
 			loadConfig({ env: { SFEXPORT_METADATA: 'true', SFEXPORT_METADATA_MANIFEST: manifest } }).metadata.enabled === true
