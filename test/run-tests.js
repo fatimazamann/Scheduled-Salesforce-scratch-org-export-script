@@ -35,6 +35,9 @@ function check(label, condition, detail) {
 	}
 }
 
+/** Records live under cj-data/ inside each backup, not loose at its root. */
+const dataFile = (exportDir, name) => path.join(exportDir, 'cj-data', name);
+
 function scratchOrg(over) {
 	return Object.assign(
 		{
@@ -175,10 +178,10 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 	check('export directory created', dir && fs.existsSync(dir));
 	check('directory named <alias>_<orgId>', dir && path.basename(dir) === 'demo-org_00D5g000004ABCDEAO', dir && path.basename(dir));
 	check('per-org manifest written', dir && fs.existsSync(path.join(dir, '_export-summary.json')));
-	check('clean-json stripped fields', dir && !/"LastModifiedDate"/.test(fs.readFileSync(path.join(dir, 'cja_cj__CJ_Connector__cs.json'), 'utf8')));
+	check('clean-json stripped fields', dir && !/"LastModifiedDate"/.test(fs.readFileSync(dataFile(dir, 'cja_cj__CJ_Connector__cs.json'), 'utf8')));
 	check('no browser login attempted', !/BROWSER_LOGIN_ATTEMPTED/.test(r.calls));
 	check('access token never logged', !/SUPER_SECRET_TOKEN_VALUE/.test(r.logText + r.stdout + JSON.stringify(r.summary)));
-	check('dataflows exported for any-to-any', dir && fs.existsSync(path.join(dir, 'cja_cj__Dataflow__cs.json')));
+	check('dataflows exported for any-to-any', dir && fs.existsSync(dataFile(dir, 'cja_cj__Dataflow__cs.json')));
 }
 
 // --- Scenario 3: multiple eligible orgs ------------------------------------
@@ -297,7 +300,7 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 	check('exported despite spaces in path', r.summary && r.summary.success === 1);
 	const dir = r.summary && r.summary.orgs[0].exportDir;
 	check('directory name sanitised', dir && path.basename(dir) === 'space-test-org_00D5g000004ABCDEAO', dir && path.basename(dir));
-	check('files landed in the spaced path', dir && fs.existsSync(path.join(dir, 'cja_cj__CJ_Connector__cs.json')));
+	check('files landed in the spaced path', dir && fs.existsSync(dataFile(dir, 'cja_cj__CJ_Connector__cs.json')));
 	const manifestPath = dir && path.join(dir, '_export-summary.json');
 	const manifest = manifestPath && fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, 'utf8')) : null;
 	check("apostrophe escaped in SOQL", !!manifest && /Name IN \('O\\'Brien Sync', 'Normal, Name'\)/.test(manifest.queries[0].soql), manifest && manifest.queries[0].soql);
@@ -609,7 +612,7 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 		});
 		check('exit code 0', r.code === 0, `got ${r.code}\n${r.stderr.slice(-600)}`);
 		const dir = r.summary && r.summary.orgs[0].exportDir;
-		check('data still exported', dir && fs.existsSync(path.join(dir, 'cja_cj__CJ_Connector__cs.json')));
+		check('data still exported', dir && fs.existsSync(dataFile(dir, 'cja_cj__CJ_Connector__cs.json')));
 		check('metadata folder created', dir && fs.existsSync(path.join(dir, 'metadata')));
 		check('retrieved files present', dir && fs.existsSync(path.join(dir, 'metadata', 'classes', 'CJThing_test.cls')));
 		check('metadata summary written', dir && fs.existsSync(path.join(dir, 'metadata', '_metadata-summary.json')));
@@ -689,7 +692,8 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 		check('exit code 0', r.code === 0, `got ${r.code}\n${r.stderr.slice(-400)}`);
 		const dir = r.summary && r.summary.orgs[0].exportDir;
 		check('metadata landed under force-app/main/default', dir && fs.existsSync(path.join(dir, 'force-app', 'main', 'default', 'classes')), dir);
-		check('data files still sit at the backup root', dir && fs.existsSync(path.join(dir, 'cja_cj__CJ_Connector__cs.json')));
+		check('records sit under cj-data/', dir && fs.existsSync(dataFile(dir, 'cja_cj__CJ_Connector__cs.json')));
+		check('nothing loose at the backup root', dir && !fs.existsSync(path.join(dir, 'cja_cj__CJ_Connector__cs.json')));
 		const proj = dir && fs.existsSync(path.join(dir, 'sfdx-project.json'))
 			? JSON.parse(fs.readFileSync(path.join(dir, 'sfdx-project.json'), 'utf8'))
 			: null;
@@ -724,7 +728,7 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 		check('run still exits 0', r.code === 0, `got ${r.code}`);
 		check('org counted as a success', r.summary && r.summary.success === 1);
 		const dir = r.summary.orgs[0].exportDir;
-		check('data export survived and was swapped into place', dir && fs.existsSync(path.join(dir, 'cja_cj__CJ_Connector__cs.json')));
+		check('data export survived and was swapped into place', dir && fs.existsSync(dataFile(dir, 'cja_cj__CJ_Connector__cs.json')));
 		const md = r.summary.orgs[0].metadata;
 		check('metadata failure recorded, not swallowed', md && md.status === 'FAILED', md && md.status);
 		check('failure reason recorded', md && /INVALID_TYPE/.test(md.error || ''), md && md.error);
@@ -990,8 +994,8 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 
 	// Mark a file so we can prove the second run REPLACED it rather than merged.
 	const target = path.join(exportRoot, 'cj-export_my-feature-org');
-	fs.writeFileSync(path.join(target, 'stale-leftover.json'), '{"gone":true}');
-	const mtimeBefore = fs.statSync(path.join(target, 'cja_cj__CJ_Connector__cs.json')).mtimeMs;
+	fs.writeFileSync(dataFile(target, 'stale-leftover.json'), '{"gone":true}');
+	const mtimeBefore = fs.statSync(dataFile(target, 'cja_cj__CJ_Connector__cs.json')).mtimeMs;
 
 	const r2 = runScenario('PO2 second run -> same folders, content replaced not merged', {
 		orgs: [
@@ -1009,8 +1013,8 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 	check('exit code 0', r2.code === 0, `got ${r2.code}`);
 	const dirs2 = fs.readdirSync(exportRoot).sort();
 	check('still exactly 3 folders', dirs2.length === 3, dirs2.join(', '));
-	check('stale file from the previous run is gone', !fs.existsSync(path.join(target, 'stale-leftover.json')));
-	const reexported = JSON.parse(fs.readFileSync(path.join(target, 'cja_cj__CJ_Connector__cs.json'), 'utf8'));
+	check('stale file from the previous run is gone', !fs.existsSync(dataFile(target, 'stale-leftover.json')));
+	const reexported = JSON.parse(fs.readFileSync(dataFile(target, 'cja_cj__CJ_Connector__cs.json'), 'utf8'));
 	check('content is the new export', reexported.records.length === 7, String(reexported.records.length));
 
 	// A failing run must leave the good copy exactly as it was.
@@ -1020,7 +1024,7 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 		config: perOrgConfig,
 	});
 	check('exit code 1', r3.code === 1, `got ${r3.code}`);
-	const survived = JSON.parse(fs.readFileSync(path.join(target, 'cja_cj__CJ_Connector__cs.json'), 'utf8'));
+	const survived = JSON.parse(fs.readFileSync(dataFile(target, 'cja_cj__CJ_Connector__cs.json'), 'utf8'));
 	check('previous good export survived the failure', survived.records.length === 7, String(survived.records.length));
 	const dirs3 = fs.readdirSync(exportRoot).sort();
 	check('no temp folder left behind by the failure', !dirs3.some((d) => d.startsWith('.tmp_')), dirs3.join(', '));

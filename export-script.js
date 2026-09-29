@@ -119,6 +119,7 @@ const SPEC = {
 	sfExecutable: { long: 'sf-executable', default: '', description: 'Full path to the sf CLI (else resolved from PATH)' },
 	sfCliEntry: { long: 'sf-cli-entry', default: '', description: "Path to the sf CLI's JS entry point; bypasses the cmd.exe shim" },
 	cleanScript: { long: 'clean-script', default: '', description: 'Path to clean-json.js (default: alongside this script)' },
+	dataSubdir: { long: 'data-subdir', default: 'cj-data', description: 'Folder under --dir the exported RECORDS are written into' },
 	metadataManifest: { long: 'metadata-manifest', default: '', description: 'package.xml to retrieve metadata with; omit to skip metadata entirely' },
 	metadataSubdir: { long: 'metadata-subdir', default: 'metadata', description: 'Folder under --dir the metadata is written into' },
 	metadataWorkDir: { long: 'metadata-work-dir', default: '', description: 'Scratch SFDX project the retrieve runs in, outside the export tree' },
@@ -246,6 +247,17 @@ if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
 // --- Metadata retrieve options ----------------------------------------------
 // Metadata is opt-in: no --metadata-manifest means this script behaves exactly
 // as it did before the feature existed.
+// Records go into their own folder rather than loose at the backup root, so
+// the backup reads as a project: metadata under its package directory, data
+// under dataSubdir, and only sfdx-project.json and the summary at the top.
+const dataSubdir = String(options.dataSubdir || 'cj-data').trim();
+if (!isSafeSubdir(dataSubdir)) {
+	die(
+		EXIT.INVALID_ARGUMENTS,
+		`--data-subdir must be a relative folder path inside the export folder, got ${JSON.stringify(dataSubdir)}.`
+	);
+}
+
 // Absolute for the same reason as the CLI paths below: the retrieve runs with
 // a different working directory than the one we were launched in.
 const metadataManifestRaw = String(options.metadataManifest || '').trim();
@@ -275,6 +287,7 @@ if (!Number.isFinite(metadataTimeoutSeconds) || metadataTimeoutSeconds <= 0) {
 	die(EXIT.INVALID_ARGUMENTS, '--metadata-timeout must be a positive number of seconds.');
 }
 const metadataRequired = options.metadataRequired === true;
+const dataDir = path.join(directoryPath, dataSubdir);
 // Outside the export tree by design -- see retrieveMetadata().
 const metadataWorkDir = options.metadataWorkDir
 	? path.resolve(process.cwd(), options.metadataWorkDir)
@@ -775,6 +788,7 @@ async function main() {
 	out(`Exporting cja_cj configuration from ${userName}`);
 	out(`  org type:         ${resolvedOrgType}`);
 	out(`  output directory: ${directoryPath}`);
+	out(`  records into:     ${dataDir}`);
 	out(`  integration type: ${integrationType || '(none)'}`);
 	out(`  connectors:       ${connectorNames.length ? connectorNames.join(', ') : '(all)'}`);
 
@@ -819,9 +833,9 @@ async function main() {
 
 	// --- 2. Prepare the output directory ----------------------------------
 	try {
-		fs.mkdirSync(directoryPath, { recursive: true });
+		fs.mkdirSync(dataDir, { recursive: true });
 	} catch (e) {
-		die(EXIT.EXPORT_FAILED, `Cannot create output directory ${directoryPath}: ${e.message}`);
+		die(EXIT.EXPORT_FAILED, `Cannot create output directory ${dataDir}: ${e.message}`);
 	}
 
 	// --- 3. Export --------------------------------------------------------
@@ -834,7 +848,7 @@ async function main() {
 		'tree',
 		'--plan',
 		'--output-dir',
-		directoryPath, // passed as one argv element: spaces need no quoting
+		dataDir, // passed as one argv element: spaces need no quoting
 		'--target-org',
 		userName,
 	];
@@ -851,10 +865,10 @@ async function main() {
 			detail
 		);
 	}
-	out(`Export written to ${directoryPath}`);
+	out(`Export written to ${dataDir}`);
 
 	// --- 4. Truncation check ----------------------------------------------
-	const truncation = detectTruncation(directoryPath);
+	const truncation = detectTruncation(dataDir);
 	for (const t of truncation) {
 		warn(
 			`Possible truncation in ${t.file} at ${t.path}: exactly ${t.count} record(s) returned, ` +
@@ -875,7 +889,7 @@ async function main() {
 		die(EXIT.CLEANUP_FAILED, `clean-json.js not found at ${cleanScript}.`);
 	}
 	out('Cleaning exported data...');
-	const clean = await sfcli.run(process.execPath, [cleanScript, directoryPath, CLEAN_FIELDS], {
+	const clean = await sfcli.run(process.execPath, [cleanScript, dataDir, CLEAN_FIELDS], {
 		cwd: __dirname,
 		timeoutMs: timeoutSeconds * 1000,
 		onStdoutLine: (line) => line.trim() && out(line),
@@ -948,6 +962,7 @@ async function main() {
 		rowLimit,
 		queries: queries.map((q) => ({ name: q.name, soql: q.soql })),
 		outputDirectory: directoryPath,
+		dataDirectory: dataDir,
 		truncationWarnings: truncation,
 		metadata,
 		startedAt: startedAt.toISOString(),

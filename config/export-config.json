@@ -17,6 +17,7 @@
   "sfCommandTimeoutSeconds": 120,
 
   "_comment_what": "What gets exported. integrationType is applied to every org; any-to-any additionally exports cja_cj__Dataflow__c. connectorFilter [] means every connector. queryLimit must stay <= 200: Salesforce requires LIMIT <= 200 on FIELDS(ALL) queries.",
+  "dataSubdir": "cj-data",
   "integrationType": "any-to-any",
   "connectorFilter": [],
   "queryLimit": 200,

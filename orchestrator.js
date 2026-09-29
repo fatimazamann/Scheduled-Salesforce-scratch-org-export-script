@@ -887,6 +887,7 @@ function buildChildArgs(cfg, org, exportDir) {
 	if (cfg.resolvedSfCliEntry) args.push('--sf-cli-entry', cfg.resolvedSfCliEntry);
 	else if (cfg.sfCliEntry) args.push('--sf-cli-entry', cfg.sfCliEntry);
 	if (cfg.cleanScript) args.push('--clean-script', cfg.cleanScript);
+	if (cfg.dataSubdir) args.push('--data-subdir', cfg.dataSubdir);
 
 	// Metadata is opt-in and per-org overridable: an org can turn it off (or a
 	// different manifest on) without a second config file.
