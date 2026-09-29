@@ -279,7 +279,8 @@ connectjunction-exports/
     cj-export_<alias>/                  one per org, replaced every run
         cja_cj__*.json                  data, cleaned
         <plan>.json                     import plan
-        metadata/                       when enabled
+        sfdx-project.json               the backup is a deployable DX project
+        force-app/main/default/         metadata, SFDX source format
         _export-summary.json            what happened, and the exact SOQL
 logs/
     export_<runId>.log                  human-readable
@@ -356,6 +357,24 @@ CLI produces no parseable error, the message falls back to the exit code plus
 the CLI's raw unfiltered output — because the noise filter that strips the
 update nag is itself capable of emptying the message.
 
+### The swap retries before it gives up
+
+A folder that has just had several hundred metadata files written into it is
+exactly what a virus scanner, the Windows Search indexer, an open Explorer
+window or an editor watching the folder holds a handle on — for a second or
+two. A single `rename` attempt loses that race and throws away an export that
+had already succeeded, which is what happened on the first real scheduled run.
+
+`renameWithRetry` makes up to five attempts with increasing backoff, for
+`EPERM`/`EBUSY`/`EACCES`/`ENOTEMPTY` only. Anything else — `ENOENT` included —
+still fails on the first attempt rather than burning four retries on an error
+that will never clear. Removing the set-aside folder is best-effort for the
+same reason.
+
+Intermittent failure at 8pm, for reasons that have nothing to do with
+Salesforce, is exactly the shape of problem nobody notices until they need the
+backup.
+
 ### Locking
 
 Atomic `fs.openSync(path, 'wx')`. A stale lock is reclaimed by checking PID
@@ -423,7 +442,7 @@ export had already succeeded.
 
 ## 11. Testing
 
-`node test/run-tests.js` — **232 assertions** against a mock Salesforce CLI. No
+`node test/run-tests.js` — **246 assertions** against a mock Salesforce CLI. No
 org, no network, no credentials. Every scenario drives the real orchestrator
 and the real exporter; only `sf` and `clean-json.js` are stubbed.
 

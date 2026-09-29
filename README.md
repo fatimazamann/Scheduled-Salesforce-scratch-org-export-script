@@ -30,7 +30,7 @@ Windows Task Scheduler
 | `config/export-config.json` | The settings you actually edit. |
 | `config/package.xml` | The metadata manifest: what the metadata retrieve captures. |
 | `config/package.xml.example` | A wildcard alternative that cannot go stale, with notes on the trade-off. |
-| `test/run-tests.js` | 211 assertions against a mock CLI. No org, no network, no credentials. |
+| `test/run-tests.js` | 246 assertions against a mock CLI. No org, no network, no credentials. |
 | `test/mock-sf.js` | A fake `sf` driven by a JSON fixture — lets tests exercise dead orgs, expired orgs, auth failures and truncation without any of them being real. |
 | `docs/SETUP.md` | Bring-up on a new machine. |
 | `docs/DESIGN.md` | What the system does and why it is built this way. |
@@ -102,9 +102,9 @@ connectjunction-exports\
         cja_cj__Dataflow__cs.json     any-to-any only
         export-demo-plan.json
         _export-summary.json          when this org was last exported
-        metadata\                     only when metadata.enabled
+        sfdx-project.json             makes the backup a deployable DX project
+        force-app\main\default\        metadata, SFDX source format
             classes\ objects\ layouts\ ...
-            _metadata-summary.json
     cj-export_integration-test\
     cj-export_dev-org-4\
 
@@ -132,7 +132,10 @@ the exports contain customer configuration, including message template bodies.
 
 ## Metadata
 
-Off by default. Two steps to turn it on:
+**On by default** — a plain `scheduled-export.bat` exports data *and* metadata.
+`--no-metadata` skips it for one run. It needs `config/package.xml`, which is in the repo.
+
+If you are pointing it at a different manifest:
 
 ```cmd
 copy "C:\path\to\your\package.xml" "C:\tools\salesforce-export\config\package.xml"
@@ -227,7 +230,7 @@ opts back in to `sf org login web` for Sandbox and Production only.
 node test\run-tests.js
 ```
 
-208 assertions covering the full test matrix against a mock Salesforce CLI: org
+246 assertions covering the full test matrix against a mock Salesforce CLI: org
 discovery and filtering, expiry, package detection, failure isolation, retry
 policy, locking, dry run, paths with spaces, SOQL escaping, Windows command-line
 escaping, metadata retrieve (including that a metadata failure never discards a
