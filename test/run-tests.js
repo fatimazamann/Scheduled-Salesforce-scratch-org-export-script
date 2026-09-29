@@ -498,6 +498,79 @@ process.stdout.write('Salesforce scheduled export -- test matrix\n');
 	check('reason quotes what the CLI actually printed', /update available/.test(reason), reason);
 }
 
+// --- The swap must survive a transiently-locked folder ---------------------------
+// A real scheduled run failed with EPERM renaming a folder that had just had 522
+// metadata files written into it -- a scanner, indexer or open Explorer window
+// holding a handle for a second or two. A single rename attempt turns that into
+// a failed backup; a few spaced attempts do not.
+{
+	process.stdout.write('\n  SWAP rename retries past a transient Windows lock\n');
+	const { renameWithRetry } = require('../orchestrator');
+	const base = fs.mkdtempSync(path.join(os.tmpdir(), 'sfexp-swap-'));
+	const from = path.join(base, 'src');
+	const to = path.join(base, 'dst');
+	fs.mkdirSync(from);
+
+	// Succeeds on the third attempt, as a released handle would.
+	let calls = 0;
+	const realRename = fs.renameSync;
+	fs.renameSync = (a, b) => {
+		calls += 1;
+		if (calls < 3) {
+			const e = new Error('EPERM: operation not permitted, rename');
+			e.code = 'EPERM';
+			throw e;
+		}
+		return realRename(a, b);
+	};
+	let tries = null;
+	let threw = null;
+	try {
+		tries = renameWithRetry(from, to, 5, 1);
+	} catch (e) {
+		threw = e;
+	}
+	fs.renameSync = realRename;
+	check('retried rather than failing on the first EPERM', threw === null, threw && threw.message);
+	check('reports how many attempts it took', tries === 3, String(tries));
+	check('the directory actually moved', fs.existsSync(to));
+
+	// A permanent lock must still surface, not loop forever.
+	let calls2 = 0;
+	fs.renameSync = () => {
+		calls2 += 1;
+		const e = new Error('EPERM: operation not permitted, rename');
+		e.code = 'EPERM';
+		throw e;
+	};
+	let gaveUp = null;
+	try {
+		renameWithRetry(path.join(base, 'a'), path.join(base, 'b'), 4, 1);
+	} catch (e) {
+		gaveUp = e;
+	}
+	fs.renameSync = realRename;
+	check('gives up after the configured attempts', gaveUp !== null && gaveUp.code === 'EPERM');
+	check('made exactly that many attempts', calls2 === 4, String(calls2));
+
+	// A non-transient error must fail immediately, not burn four retries.
+	let calls3 = 0;
+	fs.renameSync = () => {
+		calls3 += 1;
+		const e = new Error('ENOENT: no such file or directory');
+		e.code = 'ENOENT';
+		throw e;
+	};
+	let enoent = null;
+	try {
+		renameWithRetry(path.join(base, 'x'), path.join(base, 'y'), 4, 1);
+	} catch (e) {
+		enoent = e;
+	}
+	fs.renameSync = realRename;
+	check('a missing source is not retried', enoent !== null && calls3 === 1, String(calls3));
+}
+
 // --- Metadata retrieve -----------------------------------------------------------
 // The governing rule for this whole block: metadata is a SEPARATE deliverable
 // from data. It must never be able to discard a data export that succeeded,

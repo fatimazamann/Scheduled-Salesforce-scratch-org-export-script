@@ -175,16 +175,46 @@ function orgDirectoryName(org, pattern = 'cj-export_{alias}') {
  * first, so the window in which the destination does not exist is a single
  * rename rather than a recursive delete.
  */
-function swapIntoPlace(tempDir, targetDir, runId) {
+/**
+ * Rename, retrying briefly on the Windows errors that mean "someone else has
+ * this open right now".
+ *
+ * A directory that has just had hundreds of files written into it is exactly
+ * what a virus scanner, the Windows Search indexer, an open Explorer window or
+ * an editor watching the folder will be holding a handle on. Those handles are
+ * released within a second or two, so a single attempt fails where three
+ * spaced-out attempts succeed. Without this, a nightly job fails intermittently
+ * for reasons that have nothing to do with Salesforce and everything to do with
+ * whatever else happened to be running at 8pm.
+ */
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY']);
+
+function renameWithRetry(from, to, attempts = 5, waitMs = 400) {
+	for (let attempt = 1; ; attempt += 1) {
+		try {
+			fs.renameSync(from, to);
+			return attempt;
+		} catch (err) {
+			if (attempt >= attempts || !RENAME_RETRY_CODES.has(err.code)) throw err;
+			// Synchronous sleep: this runs between orgs, nothing else is in flight,
+			// and making swapIntoPlace async would ripple through the whole loop.
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs * attempt);
+		}
+	}
+}
+
+function swapIntoPlace(tempDir, targetDir, runId, log) {
 	const asideDir = `${targetDir}.old_${runId}`;
 	// The parent must exist before a rename can land in it. Under the per-run
 	// layout that parent is the run folder, which nothing has created yet.
 	fs.mkdirSync(path.dirname(targetDir), { recursive: true });
 	if (fs.existsSync(targetDir)) {
-		fs.renameSync(targetDir, asideDir);
+		const tries = renameWithRetry(targetDir, asideDir);
+		if (tries > 1 && log) log.warn(`Moving the previous export aside took ${tries} attempts -- something had the folder open.`);
 	}
 	try {
-		fs.renameSync(tempDir, targetDir);
+		const tries = renameWithRetry(tempDir, targetDir);
+		if (tries > 1 && log) log.warn(`Moving the new export into place took ${tries} attempts -- something had the folder open.`);
 	} catch (err) {
 		// Put the previous content back rather than leaving nothing behind.
 		if (fs.existsSync(asideDir) && !fs.existsSync(targetDir)) {
@@ -196,7 +226,12 @@ function swapIntoPlace(tempDir, targetDir, runId) {
 		}
 		throw err;
 	}
-	fs.rmSync(asideDir, { recursive: true, force: true });
+	// Best-effort: a scanner still holding the old folder must not fail the run.
+	try {
+		fs.rmSync(asideDir, { recursive: true, force: true });
+	} catch (err) {
+		if (log) log.warn(`Could not remove the previous export ${asideDir}: ${err.message}. It will be swept next run.`);
+	}
 }
 
 /**
@@ -1321,7 +1356,7 @@ async function main() {
 			// Only a fully successful export is allowed to replace what is there.
 			if (outcome.status === STATUS.SUCCESS) {
 				try {
-					swapIntoPlace(workDir, exportDir, runId);
+					swapIntoPlace(workDir, exportDir, runId, log);
 				} catch (err) {
 					outcome = {
 						...outcome,
@@ -1401,14 +1436,21 @@ async function main() {
 	return exitCode;
 }
 
+// Only run when executed directly. Without this guard, anything that requires
+// this file for its exported helpers -- the test suite does exactly that --
+// silently starts a real export against the real config, and can take the run
+// lock out from under an actual scheduled run.
+//
 // A top-level failure must still produce an exit code the scheduler can read.
-main()
-	.then((code) => {
-		process.exitCode = code;
-	})
-	.catch((err) => {
-		process.stderr.write(`Fatal orchestrator error: ${err && err.stack ? err.stack : err}\n`);
-		process.exitCode = EXIT.PREFLIGHT;
-	});
+if (require.main === module) {
+	main()
+		.then((code) => {
+			process.exitCode = code;
+		})
+		.catch((err) => {
+			process.stderr.write(`Fatal orchestrator error: ${err && err.stack ? err.stack : err}\n`);
+			process.exitCode = EXIT.PREFLIGHT;
+		});
+}
 
-module.exports = { STATUS, EXIT, CHILD_EXIT, makeRunId, sanitizeSegment, orgDirectoryName, classifyOrg, renderSummary, swapIntoPlace, scratchOrgBasis };
+module.exports = { STATUS, EXIT, CHILD_EXIT, makeRunId, sanitizeSegment, orgDirectoryName, classifyOrg, renderSummary, swapIntoPlace, renameWithRetry, scratchOrgBasis };
